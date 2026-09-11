@@ -1,3 +1,4 @@
+<h1>Health Chart</h1>
 This a hospital record management system that has an offline-first functionality. 
 It works even when there is no network to carryout core functions such as:
 1. Creating patient records
