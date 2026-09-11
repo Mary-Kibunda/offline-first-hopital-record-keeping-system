@@ -1,0 +1,10 @@
+# Migration revisions live in this directory, one file per revision.
+#
+# These files are applied in the order defined by each revision's
+# ``down_revision`` pointer, not alphabetically, though the file naming
+# template prefixes them with a timestamp so the directory reads in roughly
+# the order they were created.
+#
+# Keep this directory in version control. The revision files are the schema's
+# history; losing them means losing the ability to bring an older database up
+# to date.
