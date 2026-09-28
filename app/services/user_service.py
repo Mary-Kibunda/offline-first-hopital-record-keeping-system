@@ -65,20 +65,30 @@ class UserService:
     def set_role(db: Session, user: User, role: UserRole) -> User:
         """Assign ``role`` to ``user``."""
         user.role = role
-        db.commit()
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
         db.refresh(user)
         return user
-
     @staticmethod
     def set_active(db: Session, user: User, is_active: bool) -> User:
         """Activate or deactivate ``user``."""
         user.is_active = is_active
-        db.commit()
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
         db.refresh(user)
         return user
-
     @staticmethod
     def delete_user(db: Session, user: User) -> None:
         """Permanently remove ``user``."""
         db.delete(user)
-        db.commit()
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
