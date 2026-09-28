@@ -8,3 +8,6 @@
 # Keep this directory in version control. The revision files are the schema's
 # history; losing them means losing the ability to bring an older database up
 # to date.
+
+.20260916_2116_2b9e7f2527e1_create_remaining_hospital_tables
+

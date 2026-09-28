@@ -13,86 +13,70 @@ Routes enforce a policy either by adding the guard to
 parameter (when they also need the user object).
 """
 
+"""
+Shared FastAPI dependencies: pulling the current user out of a bearer
+token, and restricting endpoints to specific roles.
+"""
+from collections.abc import Callable
+
 from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.security import OAuth2PasswordBearer
+from jose import JWTError
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.security import verify_access_token
-from app.models.enums import UserRole
-from app.models.user import User
-from app.services.auth_service import AuthService
+from app.core.security import decode_access_token
+from app.models.user import User, UserRole
 
-security = HTTPBearer()
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
-INVALID_CREDENTIALS = HTTPException(
+_CREDENTIALS_ERROR = HTTPException(
     status_code=status.HTTP_401_UNAUTHORIZED,
     detail="Could not validate credentials",
     headers={"WWW-Authenticate": "Bearer"},
 )
 
 
-async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
-    db: Session = Depends(get_db),
+def get_current_user(
+    token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)
 ) -> User:
-    """Decode the bearer token and load the matching user.
-
-    Raises ``401`` when the token is missing, invalid or unknown, and ``403``
-    when the account exists but has been deactivated.
     """
-    payload = verify_access_token(credentials.credentials)
-    if not payload:
-        raise INVALID_CREDENTIALS
+    Decode the bearer token, look up the user it identifies, and reject the
+    request if the token is invalid/expired or the user no longer exists or
+    has been deactivated.
+    """
+    try:
+        payload = decode_access_token(token)
+    except JWTError as exc:
+        raise _CREDENTIALS_ERROR from exc
 
-    email = payload.get("sub")
-    if not email:
-        raise INVALID_CREDENTIALS
+    user_id = payload.get("sub")
+    if user_id is None:
+        raise _CREDENTIALS_ERROR
 
-    user = AuthService.get_user_by_email(db, email)
-    if user is None:
-        raise INVALID_CREDENTIALS
-
-    if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="User account is inactive",
-        )
-
+    user = db.get(User, user_id)
+    if user is None or not user.is_active:
+        raise _CREDENTIALS_ERROR
     return user
 
 
-async def get_current_active_user(
-    current_user: User = Depends(get_current_user),
-) -> User:
-    """Thin alias kept for readability at call sites."""
-    return current_user
-
-
-def require_roles(*allowed_roles: UserRole):
-    """Build a dependency that only lets ``allowed_roles`` through.
-
-    Returning a *factory* rather than one function per role combination keeps
-    the policy readable - ``require_roles(UserRole.ADMIN)`` - and avoids a
-    proliferation of near identical guards.
+def require_roles(*allowed_roles: UserRole) -> Callable[[User], User]:
     """
-    allowed = frozenset(allowed_roles)
+    Dependency factory for role-gated endpoints, e.g.:
 
-    async def role_guard(
-        current_user: User = Depends(get_current_active_user),
-    ) -> User:
-        if current_user.role not in allowed:
+        @router.get("/", dependencies=[Depends(require_roles(UserRole.administrator))])
+
+    or, to also get the resolved user object in the handler:
+
+        current_user: User = Depends(require_roles(UserRole.administrator))
+    """
+
+    def _check(current_user: User = Depends(get_current_user)) -> User:
+        if current_user.role not in allowed_roles:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="You do not have permission to perform this action",
+                detail="You do not have permission to perform this action.",
             )
         return current_user
 
-    return role_guard
-
-
-#: Guard for endpoints restricted to administrators.
-require_admin = require_roles(UserRole.ADMIN)
-
-#: Guard for endpoints open to any signed-in user (admin or standard).
-require_any_role = require_roles(UserRole.ADMIN, UserRole.USER)
+    return _check

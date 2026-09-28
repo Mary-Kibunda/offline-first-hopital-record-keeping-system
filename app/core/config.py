@@ -3,7 +3,7 @@ from pydantic import PostgresDsn
 
 class Settings(BaseSettings):
     #application settings for the offline-first hospital record keeping system
-    PROJECT_NAME: str = "Offline-First Hospital Record Keeping System"
+    PROJECT_NAME: str = "Health Chart"
     PROJECT_VERSION: str = "1.0.0"
     API_V1_STR: str = "/api/v1"
 
