@@ -34,15 +34,17 @@ if config.config_file_name is not None:
 
 def import_models() -> None:
     """Import every model module so ``Base.metadata`` is fully populated."""
-    from app.models import enums  # noqa: F401
-    from app.models import user  # noqa: F401
-
-    # The modules below currently exist as empty placeholders. Uncomment each
-    # one as its classes are written; autogenerate will then pick the tables up
-    # automatically:
-    #
-    # from app.models import appointment, consultation, drug_stock, hospital
-    # from app.models import patient, perscription, sync_log
+    from app.models import (  # noqa: F401
+        appointment,
+        clinic,
+        consultation,
+        drug_stock,
+        enums,
+        patient,
+        perscription,
+        sync_log,
+        user,
+    )
 
 
 import_models()

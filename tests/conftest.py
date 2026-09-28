@@ -6,85 +6,143 @@ the suite fast and dependency-free while still exercising the real routes,
 dependency wiring and role guards.
 """
 
+"""
+Shared pytest fixtures.
+
+Tests run against a real PostgreSQL database (health_chart), not
+SQLite-in-memory — this project's schema uses PostgreSQL-specific behaviour
+in a few places (portable-but-still-checked enum columns, timezone-aware
+DateTime columns), and testing against a different database engine than
+production risks passing tests that would fail for real. Each test runs
+inside a transaction that is rolled back afterwards, so tests never leak
+data into one another and the suite can run repeatedly without resetting
+the database by hand.
+"""
+import os
+from collections.abc import Generator
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.orm import Session, sessionmaker
 
-from app.core.database import Base, get_db
-from app.core.security import get_password_hash
-from app.main import app
-from app.models.enums import UserRole
-from app.models.user import User
+os.environ.setdefault(
+    "DATABASE_URL", "postgresql+psycopg://postgres:cookie45%3F%21@localhost:5432/health_chart"
+)
+os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-local-dev-only")
 
-API = "/api/v1"
-DEFAULT_PASSWORD = "supersecret123"
+from app.api.deps import get_current_user  # noqa: E402
+from app.core.database import Base, get_db  # noqa: E402
+from app.core.security import hash_password  # noqa: E402
+from app.main import app  # noqa: E402
+from app.models.clinic import Clinic  # noqa: E402
+from app.models.user import User, UserRole  # noqa: E402
+
+TEST_DATABASE_URL = os.environ["DATABASE_URL"]
+
+engine = create_engine(TEST_DATABASE_URL, future=True)
+TestSessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 
 
-@pytest.fixture()
-def db_session():
-    """A fresh in-memory database per test."""
-    engine = create_engine(
-        "sqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
+@pytest.fixture(scope="session", autouse=True)
+def _create_schema() -> Generator[None, None, None]:
+    """Tables already exist (created via Alembic against health_chart);
+    this just guarantees they're there even if someone runs the suite
+    against a fresh database, without duplicating Alembic's migration
+    logic."""
+    import app.models  # noqa: F401
+
     Base.metadata.create_all(bind=engine)
-    testing_session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    yield
 
-    session = testing_session()
+
+@pytest.fixture
+def db_session() -> Generator[Session, None, None]:
+    """
+    One session per test, wrapped in a transaction that is always rolled
+    back — so every test starts from a clean slate without needing to
+    truncate tables manually.
+    """
+    connection = engine.connect()
+    transaction = connection.begin()
+    session = TestSessionLocal(bind=connection)
+
     try:
         yield session
     finally:
         session.close()
-        Base.metadata.drop_all(bind=engine)
+        transaction.rollback()
+        connection.close()
 
 
-@pytest.fixture()
-def client(db_session):
-    """A TestClient wired to the in-memory database."""
+@pytest.fixture
+def client(db_session: Session) -> Generator[TestClient, None, None]:
+    """A TestClient whose requests use the same rolled-back-per-test session."""
 
-    def override_get_db():
+    def _override_get_db() -> Generator[Session, None, None]:
         yield db_session
 
-    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_db] = _override_get_db
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
 
 
-def create_user(
-    db_session,
-    email: str,
-    password: str = DEFAULT_PASSWORD,
-    role: UserRole = UserRole.USER,
-    is_active: bool = True,
-) -> User:
-    """Insert a user directly, bypassing the API."""
+@pytest.fixture
+def sample_clinic(db_session: Session) -> Clinic:
+    clinic = Clinic(name="Chongwe First-Level Hospital", location="Chongwe")
+    db_session.add(clinic)
+    db_session.flush()
+    return clinic
+
+
+@pytest.fixture
+def sample_admin(db_session: Session, sample_clinic: Clinic) -> User:
+    admin = User(
+        name="Ruth Mwape",
+        username="r.mwape",
+        role=UserRole.administrator,
+        clinic_id=sample_clinic.id,
+        password_hash=hash_password("adminpass123"),
+    )
+    db_session.add(admin)
+    db_session.flush()
+    return admin
+
+
+@pytest.fixture
+def sample_registry_officer(db_session: Session, sample_clinic: Clinic) -> User:
     user = User(
-        email=email,
-        username=email.split("@")[0],
-        hashed_password=get_password_hash(password),
-        role=role,
-        is_active=is_active,
+        name="Mutinta Banda",
+        username="m.banda",
+        role=UserRole.registry_officer,
+        clinic_id=sample_clinic.id,
+        password_hash=hash_password("password123"),
     )
     db_session.add(user)
-    db_session.commit()
-    db_session.refresh(user)
+    db_session.flush()
     return user
 
 
-def login(client, email: str, password: str = DEFAULT_PASSWORD) -> str:
-    """Log in and return the bearer token."""
-    response = client.post(
-        f"{API}/auth/login",
-        data={"username": email, "password": password},
-    )
-    assert response.status_code == 200, response.text
-    return response.json()["access_token"]
+@pytest.fixture
+def auth_client(client: TestClient, sample_registry_officer: User) -> Generator[TestClient, None, None]:
+    """A TestClient pre-authenticated as a registry officer."""
+
+    def _override_current_user() -> User:
+        return sample_registry_officer
+
+    app.dependency_overrides[get_current_user] = _override_current_user
+    yield client
+    app.dependency_overrides.pop(get_current_user, None)
 
 
-def auth_headers(client, email: str, password: str = DEFAULT_PASSWORD) -> dict[str, str]:
-    """Convenience wrapper returning an Authorization header for ``email``."""
-    return {"Authorization": f"Bearer {login(client, email, password)}"}
+@pytest.fixture
+def admin_client(client: TestClient, sample_admin: User) -> Generator[TestClient, None, None]:
+    """A TestClient pre-authenticated as an administrator."""
+
+    def _override_current_user() -> User:
+        return sample_admin
+
+    app.dependency_overrides[get_current_user] = _override_current_user
+    yield client
+    app.dependency_overrides.pop(get_current_user, None)

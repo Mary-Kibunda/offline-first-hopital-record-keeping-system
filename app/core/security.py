@@ -25,6 +25,10 @@ def _password_bytes(password: str) -> bytes:
     return password.encode("utf-8")[:BCRYPT_MAX_BYTES]
 
 
+def hash_password(password: str) -> str:
+    return pwd_context.hash(password)
+
+
 def get_password_hash(password: str) -> str:
     """Return the bcrypt hash of ``password`` as a UTF-8 string."""
     hashed = bcrypt.hashpw(_password_bytes(password), bcrypt.gensalt())
@@ -40,9 +44,13 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
         return False
 
 
-def create_access_token(data: dict, expires_delta: timedelta | None = None) -> str:
-    """Return a signed JWT containing ``data`` plus an expiry claim."""
-    to_encode = data.copy()
+def create_access_token(
+    subject: str,
+    extra_claims: dict | None = None,
+    expires_delta: timedelta | None = None,
+) -> str:
+    """Return a signed JWT containing the subject and optional extra claims."""
+    to_encode = {"sub": subject, **(extra_claims or {})}
 
     if expires_delta:
         expire = datetime.utcnow() + expires_delta
@@ -53,14 +61,19 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None) -> s
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
-def verify_access_token(token: str) -> dict:
+def decode_access_token(token: str) -> dict:
     """Decode ``token`` and return its claims.
 
-    Raises ``401`` for any invalid or expired token. ``JWTError`` is the base
-    class of every python-jose JWT failure, so one handler covers them all.
+    ``JWTError`` is allowed to propagate so FastAPI dependencies can convert
+    it into the application's standard credentials error.
     """
+    return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+
+
+def verify_access_token(token: str) -> dict:
+    """Decode ``token`` and raise ``401`` when it is invalid or expired."""
     try:
-        return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        return decode_access_token(token)
     except JWTError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

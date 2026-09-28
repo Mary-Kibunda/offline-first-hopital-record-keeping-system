@@ -7,45 +7,37 @@ database stays readable and remains stable if the enum members are ever
 renamed.
 """
 
-import uuid
-from datetime import datetime
+import enum
 
-from sqlalchemy import Boolean, Column, Enum, String, TIMESTAMP, Uuid, true
+from sqlalchemy import Boolean, ForeignKey, String
+from sqlalchemy import Enum as SAEnum
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
-from app.models.enums import UserRole
+from app.models.mixins import SyncMixin
 
 
-class User(Base):
+class UserRole(str, enum.Enum):
+    registry_officer = "registry_officer"
+    clinician = "clinician"
+    pharmacist = "pharmacist"
+    administrator = "administrator"
+
+
+class User(Base, SyncMixin):
     __tablename__ = "users"
 
-    id = Column(Uuid(as_uuid=True), primary_key=True, index=True, nullable=False, default=uuid.uuid4)
-    username = Column(String, unique=False, index=True, nullable=False)
-    email = Column(String, unique=True, index=True, nullable=False)
-    hashed_password = Column(String, nullable=False)
-    role = Column(
-        Enum(
-            UserRole,
-            name="user_role",
-            values_callable=lambda enum_cls: [member.value for member in enum_cls],
-        ),
+    clinic_id: Mapped[str] = mapped_column(String(36), ForeignKey("clinics.id"), nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    username: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(200), nullable=False)
+    role: Mapped[UserRole] = mapped_column(
+        SAEnum(UserRole, values_callable=lambda obj: [e.value for e in obj], native_enum=False),
         nullable=False,
-        default=UserRole.USER,
-        server_default=UserRole.USER.value,
+        default=UserRole.registry_officer,
     )
-    is_active = Column(Boolean, nullable=False, default=True, server_default=true())
-    created_at = Column(TIMESTAMP(timezone=True), nullable=True, default=datetime.utcnow)
-    updated_at = Column(
-        TIMESTAMP(timezone=True),
-        nullable=True,
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow,
-    )
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
-    def has_role(self, *roles: UserRole) -> bool:
-        """Return ``True`` when this user holds any of ``roles``.
-
-        Reads as intent (``if user.has_role(...)``) instead of forcing call
-        sites to reach into the raw column value.
-        """
-        return self.role in roles
+    clinic: Mapped["Clinic"] = relationship(back_populates="users")
+    appointments: Mapped[list["Appointment"]] = relationship(back_populates="staff")
+    consultations: Mapped[list["Consultation"]] = relationship(back_populates="staff")
