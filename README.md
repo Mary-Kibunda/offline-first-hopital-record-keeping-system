@@ -88,7 +88,7 @@ tests/                     36 tests, ~90% coverage, run against real Postgres
 
 6. **Run it**:
    ```bash
-   uv run fastapi dev app/main.py
+   uvicorn main:app --reload
    ```
    Visit `http://127.0.0.1:8000/docs` for the interactive API docs.
 
@@ -123,6 +123,8 @@ is a strong starting point, not a guarantee.
   `conflict`, or `rejected`.
 - `GET /api/v1/sync/pull?since=<timestamp>` — returns every record changed
   after `since`, across all syncable entities.
+- `GET /api/v1/sync/log` — returns the authenticated user's sync history;
+  administrators can review all users' history, with the owner shown per row.
 - `POST /api/v1/sync/conflicts/{entity_type}/{entity_id}/resolve` — applies
   a staff member's manual "keep this device's version" / "keep server
   version" decision.

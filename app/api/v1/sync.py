@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user
 from app.core.database import get_db
 from app.models.sync_log import SyncLog
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.schemas.sync import (
     ConflictResolutionRequest,
     SyncLogRead,
@@ -34,7 +34,7 @@ def push(
     results: list[SyncPushResult] = []
     for item in payload.items:
         try:
-            result = push_item(db, payload.device_id, item)
+            result = push_item(db, payload.device_id, current_user.id, item)
         except UnknownEntityTypeError as exc:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Unknown entity_type: {exc}"
@@ -88,5 +88,13 @@ def get_sync_log(
     limit: int = Query(default=50, le=500),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> list[SyncLog]:
-    return db.query(SyncLog).order_by(SyncLog.synced_at.desc()).limit(limit).all()
+) -> list[SyncLogRead]:
+    query = db.query(SyncLog, User.name).outerjoin(User, SyncLog.user_id == User.id)
+    if current_user.role != UserRole.administrator:
+        query = query.filter(SyncLog.user_id == current_user.id)
+
+    rows = query.order_by(SyncLog.synced_at.desc()).limit(limit).all()
+    return [
+        SyncLogRead.model_validate(entry).model_copy(update={"user_name": user_name})
+        for entry, user_name in rows
+    ]
