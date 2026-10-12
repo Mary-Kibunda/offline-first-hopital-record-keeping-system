@@ -62,6 +62,8 @@ class ConflictResolutionRequest(BaseModel):
 
 class SyncLogRead(BaseModel):
     id: str
+    user_id: str | None = None
+    user_name: str | None = None
     device_id: str
     entity_type: str
     entity_id: str

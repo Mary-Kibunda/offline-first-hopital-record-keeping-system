@@ -72,7 +72,7 @@ def _entity_fields_differ(existing: Any, incoming_fields: dict[str, Any]) -> boo
     return False
 
 
-def push_item(db: Session, device_id: str, item: SyncPushItem) -> SyncPushResult:
+def push_item(db: Session, device_id: str, user_id: str, item: SyncPushItem) -> SyncPushResult:
     """Apply one queued record to the database, per the policy above."""
     registry_entry = _REGISTRY.get(item.entity_type)
     if registry_entry is None:
@@ -117,7 +117,7 @@ def push_item(db: Session, device_id: str, item: SyncPushItem) -> SyncPushResult
         )
         db.add(record)
         db.flush()
-        _log(db, device_id, item.entity_type, entity_id, SyncOperation.create, conflict=False)
+        _log(db, device_id, user_id, item.entity_type, entity_id, SyncOperation.create, conflict=False)
         return SyncPushResult(
             entity_type=item.entity_type, entity_id=entity_id, status="created", server_version=incoming_version
         )
@@ -129,7 +129,7 @@ def push_item(db: Session, device_id: str, item: SyncPushItem) -> SyncPushResult
         existing.origin_device_id = origin_device_id
         existing.sync_status = SyncStatus.synced
         db.flush()
-        _log(db, device_id, item.entity_type, entity_id, SyncOperation.update, conflict=False)
+        _log(db, device_id, user_id, item.entity_type, entity_id, SyncOperation.update, conflict=False)
         return SyncPushResult(
             entity_type=item.entity_type, entity_id=entity_id, status="updated", server_version=incoming_version
         )
@@ -147,7 +147,7 @@ def push_item(db: Session, device_id: str, item: SyncPushItem) -> SyncPushResult
 
     existing.sync_status = SyncStatus.conflict
     db.flush()
-    _log(db, device_id, item.entity_type, entity_id, SyncOperation.update, conflict=True)
+    _log(db, device_id, user_id, item.entity_type, entity_id, SyncOperation.update, conflict=True)
     return SyncPushResult(
         entity_type=item.entity_type,
         entity_id=entity_id,
@@ -160,6 +160,7 @@ def push_item(db: Session, device_id: str, item: SyncPushItem) -> SyncPushResult
 def _log(
     db: Session,
     device_id: str,
+    user_id: str,
     entity_type: str,
     entity_id: str,
     operation: SyncOperation,
@@ -168,6 +169,7 @@ def _log(
 ) -> None:
     db.add(
         SyncLog(
+            user_id=user_id,
             device_id=device_id,
             entity_type=entity_type,
             entity_id=entity_id,

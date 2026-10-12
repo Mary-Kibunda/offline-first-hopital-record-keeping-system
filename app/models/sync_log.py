@@ -2,7 +2,7 @@
 
 from datetime import datetime
 import enum
-from sqlalchemy import Boolean, DateTime, String
+from sqlalchemy import Boolean, DateTime, ForeignKey, String
 from app.core.database import Base
 from sqlalchemy import Enum as SAEnum
 from app.core.database import Base
@@ -18,6 +18,9 @@ class SyncLog(Base):
   __tablename__ = "sync_log"
 
   id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+  user_id: Mapped[str | None] = mapped_column(
+    String(36), ForeignKey("users.id"), nullable=True, index=True
+  )
   device_id: Mapped[str] = mapped_column(String(64), nullable=False)
   entity_type: Mapped[str] = mapped_column(String(50), nullable=False)
   entity_id: Mapped[str] = mapped_column(String(36), nullable=False)
