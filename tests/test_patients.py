@@ -1,140 +1,136 @@
-"""
-Shared pytest fixtures.
-
-Tests run against a real PostgreSQL database (health_chart), not
-SQLite-in-memory — this project's schema uses PostgreSQL-specific behaviour
-in a few places (portable-but-still-checked enum columns, timezone-aware
-DateTime columns), and testing against a different database engine than
-production risks passing tests that would fail for real. Each test runs
-inside a transaction that is rolled back afterwards, so tests never leak
-data into one another and the suite can run repeatedly without resetting
-the database by hand.
-"""
-import os
-from collections.abc import Generator
-
-import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, sessionmaker
 
-os.environ.setdefault(
-    "DATABASE_URL", "postgresql+psycopg://postgres:cookie45%3F%21@localhost:5432/health_chart"
-)
-os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-local-dev-only")
-
-from app.api.deps import get_current_user  # noqa: E402
-from app.core.database import Base, get_db  # noqa: E402
-from app.core.security import hash_password  # noqa: E402
-from app.main import app  # noqa: E402
-from app.models.clinic import Clinic  # noqa: E402
-from app.models.user import User, UserRole  # noqa: E402
-
-TEST_DATABASE_URL = os.environ["DATABASE_URL"]
-
-engine = create_engine(TEST_DATABASE_URL, future=True)
-TestSessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+from app.models.patient import Patient
 
 
-@pytest.fixture(scope="session", autouse=True)
-def _create_schema() -> Generator[None, None, None]:
-    """Tables already exist (created via Alembic against health_chart);
-    this just guarantees they're there even if someone runs the suite
-    against a fresh database, without duplicating Alembic's migration
-    logic."""
-    import app.models  # noqa: F401
-
-    Base.metadata.create_all(bind=engine)
-    yield
-
-
-@pytest.fixture
-def db_session() -> Generator[Session, None, None]:
-    """
-    One session per test, wrapped in a transaction that is always rolled
-    back — so every test starts from a clean slate without needing to
-    truncate tables manually.
-    """
-    connection = engine.connect()
-    transaction = connection.begin()
-    session = TestSessionLocal(bind=connection)
-
-    try:
-        yield session
-    finally:
-        session.close()
-        transaction.rollback()
-        connection.close()
-
-
-@pytest.fixture
-def client(db_session: Session) -> Generator[TestClient, None, None]:
-    """A TestClient whose requests use the same rolled-back-per-test session."""
-
-    def _override_get_db() -> Generator[Session, None, None]:
-        yield db_session
-
-    app.dependency_overrides[get_db] = _override_get_db
-    with TestClient(app) as test_client:
-        yield test_client
-    app.dependency_overrides.clear()
-
-
-@pytest.fixture
-def sample_clinic(db_session: Session) -> Clinic:
-    clinic = Clinic(name="Chongwe First-Level Hospital", location="Chongwe")
-    db_session.add(clinic)
-    db_session.flush()
-    return clinic
-
-
-@pytest.fixture
-def sample_admin(db_session: Session, sample_clinic: Clinic) -> User:
-    admin = User(
-        name="Ruth Mwape",
-        username="r.mwape",
-        role=UserRole.administrator,
-        clinic_id=sample_clinic.id,
-        password_hash=hash_password("adminpass123"),
+def test_registry_officer_can_create_and_list_patients(
+    auth_client: TestClient, sample_clinic
+) -> None:
+    response = auth_client.post(
+        "/api/v1/patients",
+        json={
+            "first_name": "Chanda",
+            "last_name": "Moyo",
+            "date_of_birth": "1988-05-14",
+            "gender": "female",
+            "registered_clinic_id": sample_clinic.id,
+        },
     )
-    db_session.add(admin)
-    db_session.flush()
-    return admin
+    assert response.status_code == 201, response.text
+    patient_id = response.json()["id"]
+    assert auth_client.get("/api/v1/patients").json()[0]["id"] == patient_id
 
 
-@pytest.fixture
-def sample_registry_officer(db_session: Session, sample_clinic: Clinic) -> User:
-    user = User(
-        name="Mutinta Banda",
-        username="m.banda",
-        role=UserRole.registry_officer,
-        clinic_id=sample_clinic.id,
-        password_hash=hash_password("password123"),
+def test_patient_rejects_unknown_clinic(auth_client: TestClient) -> None:
+    response = auth_client.post(
+        "/api/v1/patients",
+        json={
+            "first_name": "Chanda",
+            "last_name": "Moyo",
+            "date_of_birth": "1988-05-14",
+            "gender": "female",
+            "registered_clinic_id": "missing-clinic-id",
+        },
     )
-    db_session.add(user)
-    db_session.flush()
-    return user
+    assert response.status_code == 404
 
 
-@pytest.fixture
-def auth_client(client: TestClient, sample_registry_officer: User) -> Generator[TestClient, None, None]:
-    """A TestClient pre-authenticated as a registry officer."""
+def test_clinician_can_read_patient_records(with_role, client: TestClient, sample_patient: Patient) -> None:
+    from app.models.user import UserRole
 
-    def _override_current_user() -> User:
-        return sample_registry_officer
-
-    app.dependency_overrides[get_current_user] = _override_current_user
-    yield client
-    app.dependency_overrides.pop(get_current_user, None)
+    with_role(UserRole.clinician)
+    response = client.get(f"/api/v1/patients/{sample_patient.id}")
+    assert response.status_code == 200
 
 
-@pytest.fixture
-def admin_client(client: TestClient, sample_admin: User) -> Generator[TestClient, None, None]:
-    """A TestClient pre-authenticated as an administrator."""
+def test_registry_officer_cannot_create_consultation(auth_client: TestClient, sample_patient: Patient) -> None:
+    response = auth_client.post(
+        "/api/v1/consultations",
+        json={
+            "patient_id": sample_patient.id,
+            "staff_id": "missing-user-id",
+            "diagnosis": "Not authorized",
+        },
+    )
+    assert response.status_code == 403
 
-    def _override_current_user() -> User:
-        return sample_admin
 
-    app.dependency_overrides[get_current_user] = _override_current_user
-    yield client
-    app.dependency_overrides.pop(get_current_user, None)
+def test_clinician_consultation_checks_related_ids(
+    client: TestClient, with_role, sample_patient: Patient
+) -> None:
+    from app.models.user import UserRole
+
+    clinician = with_role(UserRole.clinician)
+    response = client.post(
+        "/api/v1/consultations",
+        json={
+            "patient_id": sample_patient.id,
+            "staff_id": clinician.id,
+            "appointment_id": "missing-appointment-id",
+            "diagnosis": "Missing references",
+        },
+    )
+    assert response.status_code == 404
+    assert "appointment_id" in response.json()["detail"]
+
+    response = client.post(
+        "/api/v1/consultations",
+        json={
+            "patient_id": sample_patient.id,
+            "staff_id": "missing-user-id",
+            "diagnosis": "Missing staff",
+        },
+    )
+    assert response.status_code == 404
+    assert "staff_id" in response.json()["detail"]
+
+
+def test_appointment_checks_related_patient_and_staff(
+    auth_client: TestClient,
+) -> None:
+    response = auth_client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": "missing-patient-id",
+            "staff_id": "missing-staff-id",
+            "scheduled_at": "2026-10-10T12:00:00Z",
+        },
+    )
+    assert response.status_code == 404
+    assert "patient_id" in response.json()["detail"]
+
+
+def test_drug_stock_checks_related_clinic(client: TestClient, with_role) -> None:
+    from app.models.user import UserRole
+
+    with_role(UserRole.pharmacist)
+    response = client.post(
+        "/api/v1/drug-stock",
+        json={
+            "clinic_id": "missing-clinic-id",
+            "drug_name": "Paracetamol",
+            "quantity_available": 10,
+            "reorder_threshold": 3,
+        },
+    )
+    assert response.status_code == 404
+    assert "clinic_id" in response.json()["detail"]
+
+
+def test_prescription_checks_related_records(
+    client: TestClient, with_role
+) -> None:
+    from app.models.user import UserRole
+
+    with_role(UserRole.clinician)
+    response = client.post(
+        "/api/v1/prescriptions",
+        json={
+            "consultation_id": "missing-consultation-id",
+            "drug_id": "missing-drug-id",
+            "dosage": "1 tablet",
+            "quantity": 1,
+        },
+    )
+    assert response.status_code == 404
+    assert "consultation_id" in response.json()["detail"]
