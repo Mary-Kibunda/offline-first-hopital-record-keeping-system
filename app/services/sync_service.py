@@ -39,6 +39,7 @@ from app.schemas.drug_stock import DrugStockCreate
 from app.schemas.patient import PatientCreate
 from app.schemas.perscription import PrescriptionCreate
 from app.schemas.sync import SyncPushItem, SyncPushResult
+from app.services.references import MissingReferenceError, validate_references
 
 _REGISTRY: dict[str, tuple[type, type[BaseModel]]] = {
     "patient": (Patient, PatientCreate),
@@ -94,6 +95,15 @@ def push_item(db: Session, device_id: str, user_id: str, item: SyncPushItem) -> 
             detail=f"Validation failed: {exc.errors()}",
         )
     clean_fields = validated.model_dump(exclude={"id"})
+    try:
+        validate_references(db, model_cls, clean_fields)
+    except MissingReferenceError as exc:
+        return SyncPushResult(
+            entity_type=item.entity_type,
+            entity_id=entity_id,
+            status="rejected",
+            detail=str(exc),
+        )
 
     existing = db.get(model_cls, entity_id)
 
@@ -170,13 +180,19 @@ def _log(
     )
 
 
-def pull_updates(db: Session, since: datetime | None) -> dict[str, list[dict[str, Any]]]:
+def pull_updates(
+    db: Session,
+    since: datetime | None,
+    entity_types: frozenset[str] | set[str] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
     """
-    Return every record across all syncable entities updated after `since`
-    (or everything, if `since` is None — a device's very first sync).
+    Return allowed syncable records updated after `since` (or all allowed
+    records when `since` is None — a device's very first sync).
     """
     result: dict[str, list[dict[str, Any]]] = {}
     for entity_type, (model_cls, _schema_cls) in _REGISTRY.items():
+        if entity_types is not None and entity_type not in entity_types:
+            continue
         query = db.query(model_cls)
         if since is not None:
             query = query.filter(model_cls.updated_at > since)
@@ -216,7 +232,9 @@ def resolve_conflict(
             raise ValueError("local_data is required when keep_local is true")
         entity_fields = {k: v for k, v in local_data.items() if k not in _SYNC_META_KEYS}
         validated = schema_cls.model_validate({**entity_fields, "id": entity_id})
-        for key, value in validated.model_dump(exclude={"id"}).items():
+        clean_fields = validated.model_dump(exclude={"id"})
+        validate_references(db, model_cls, clean_fields)
+        for key, value in clean_fields.items():
             setattr(existing, key, value)
         existing.version += 1
 

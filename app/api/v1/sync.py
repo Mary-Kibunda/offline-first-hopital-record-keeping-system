@@ -4,9 +4,11 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_roles
+from app.api.policies import SYNC_ROLES, sync_entities_for
 from app.core.database import get_db
 from app.models.sync_log import SyncLog
+from app.models.user import User, UserRole
 from app.models.user import User, UserRole
 from app.schemas.sync import (
     ConflictResolutionRequest,
@@ -24,13 +26,25 @@ from app.services.sync_service import (
     resolve_conflict,
 )
 
-router = APIRouter(prefix="/sync", tags=["sync"])
+router = APIRouter(
+    prefix="/sync",
+    tags=["sync"],
+    dependencies=[Depends(require_roles(*SYNC_ROLES))],
+)
 
 
 @router.post("/push", response_model=SyncPushResponse)
 def push(
     payload: SyncPushRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
 ) -> SyncPushResponse:
+    allowed_entities = sync_entities_for(current_user.role)
+    forbidden = sorted({item.entity_type for item in payload.items} - allowed_entities)
+    if forbidden:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"You do not have permission to sync: {', '.join(forbidden)}.",
+        )
+
     results: list[SyncPushResult] = []
     for item in payload.items:
         try:
@@ -52,7 +66,7 @@ def pull(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> SyncPullResponse:
-    data = pull_updates(db, since)
+    data = pull_updates(db, since, sync_entities_for(current_user.role))
     return SyncPullResponse(
         server_time=datetime.now(timezone.utc),
         patients=data.get("patient", []),
@@ -71,6 +85,12 @@ def resolve(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> SyncPushResult:
+    if entity_type not in sync_entities_for(current_user.role):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to resolve conflicts for this entity type.",
+        )
+
     try:
         result = resolve_conflict(
             db, entity_type, entity_id, keep_local=payload.keep_local, local_data=payload.local_data
@@ -88,13 +108,9 @@ def get_sync_log(
     limit: int = Query(default=50, le=500),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> list[SyncLogRead]:
-    query = db.query(SyncLog, User.name).outerjoin(User, SyncLog.user_id == User.id)
+) -> list[SyncLog]:
+    query = db.query(SyncLog)
+    allowed_entities = sync_entities_for(current_user.role)
     if current_user.role != UserRole.administrator:
-        query = query.filter(SyncLog.user_id == current_user.id)
-
-    rows = query.order_by(SyncLog.synced_at.desc()).limit(limit).all()
-    return [
-        SyncLogRead.model_validate(entry).model_copy(update={"user_name": user_name})
-        for entry, user_name in rows
-    ]
+        query = query.filter(SyncLog.entity_type.in_(allowed_entities))
+    return query.order_by(SyncLog.synced_at.desc()).limit(limit).all()

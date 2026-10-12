@@ -1,8 +1,8 @@
 """User account model.
 
-A user has exactly one role (see :class:`app.models.enums.UserRole`) which is
+A user has exactly one role (see :class:`UserRole`) which is
 what role based access control keys off. The ``role`` column stores the *value*
-of the enum (``"admin"`` / ``"user"``) rather than the member name, so the
+of the enum (for example ``"administrator"``) rather than the member name, so the
 database stays readable and remains stable if the enum members are ever
 renamed.
 """
