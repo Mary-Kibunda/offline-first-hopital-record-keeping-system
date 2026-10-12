@@ -9,6 +9,7 @@ from app.api.policies import SYNC_ROLES, sync_entities_for
 from app.core.database import get_db
 from app.models.sync_log import SyncLog
 from app.models.user import User, UserRole
+from app.models.user import User, UserRole
 from app.schemas.sync import (
     ConflictResolutionRequest,
     SyncLogRead,
@@ -47,7 +48,7 @@ def push(
     results: list[SyncPushResult] = []
     for item in payload.items:
         try:
-            result = push_item(db, payload.device_id, item)
+            result = push_item(db, payload.device_id, current_user.id, item)
         except UnknownEntityTypeError as exc:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Unknown entity_type: {exc}"

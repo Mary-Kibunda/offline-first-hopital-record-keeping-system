@@ -55,7 +55,7 @@ arbitrary roles through `POST /api/v1/users`.
 4. Run the server:
 
    ```bash
-   uv run fastapi dev app/main.py
+   uvicorn main:app --reload
    ```
 
    Open `http://127.0.0.1:8000/docs` for the API documentation.
@@ -85,5 +85,20 @@ After changing a model in `app/models/`:
 uv run alembic revision --autogenerate -m "describe the change"
 uv run alembic upgrade head
 ```
+Always read the generated migration file before applying it — autogenerate
+is a strong starting point, not a guarantee.
 
-Review generated migrations before applying them.
+## The sync protocol, briefly
+
+- `POST /api/v1/sync/push` — a device sends a batch of locally
+  created/edited records (each carrying its own client-generated UUID and
+  version number). Each item comes back as `created`, `updated`,
+  `conflict`, or `rejected`.
+- `GET /api/v1/sync/pull?since=<timestamp>` — returns every record changed
+  after `since`, across all syncable entities.
+- `POST /api/v1/sync/conflicts/{entity_type}/{entity_id}/resolve` — applies
+  a staff member's manual "keep this device's version" / "keep server
+  version" decision.
+
+The full conflict-detection policy is documented in the docstring at the
+top of `app/services/sync_service.py`.
