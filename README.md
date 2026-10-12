@@ -1,62 +1,32 @@
-# Health Chart — Backend
+# Health Chart Backend
 
-Python + FastAPI + PostgreSQL backend for the offline-first hospital
-records system. This is the central server the Next.js frontend's sync
-engine talks to — see the main project proposal for the full architecture.
+Python + FastAPI + PostgreSQL backend for an offline-first hospital records
+system.
 
 ## Stack
 
-- **FastAPI** (`fastapi[standard]`) — REST API
-- **SQLAlchemy 2.0** — ORM, using the modern `Mapped[]`/`mapped_column()` style
-- **PostgreSQL** via `psycopg` (v3) — central database
-- **Alembic** — schema migrations
-- **bcrypt** (used directly, not via passlib — see note below) — password hashing
-- **PyJWT** — auth tokens
-- **pytest** + real PostgreSQL — the test suite runs against an actual
-  Postgres database (`health_chart_test`), not SQLite-in-memory, so the
-  tests reflect what production actually does
+- FastAPI with OAuth2 bearer authentication
+- SQLAlchemy 2.0 and Alembic
+- PostgreSQL via psycopg 3
+- bcrypt password hashing and python-jose JWTs
+- pytest with isolated in-memory SQLite test fixtures
 
-### Why bcrypt directly, not passlib
+## Roles
 
-`passlib` (last released 2020) is incompatible with `bcrypt>=4.1` — its
-internal version-detection code raises a spurious "password cannot be
-longer than 72 bytes" error even for short passwords, because it expects an
-attribute (`bcrypt.__about__`) modern bcrypt no longer ships. This is a
-known, unresolved upstream issue. `app/core/security.py` calls `bcrypt`
-directly instead, and explicitly rejects (rather than silently truncates)
-passwords over bcrypt's real 72-byte limit.
+- **administrator**: all API endpoints, including user management and reports
+- **clinician**: patients, appointments, consultations, prescriptions and sync
+- **pharmacist**: prescriptions, drug stock and sync
+- **registry_officer**: patients, appointments and sync
 
-## Project layout
-
-```
-app/
-├── main.py              FastAPI app instance, CORS, router mounting
-├── core/
-│   ├── config.py        Settings (reads .env / environment variables)
-│   ├── database.py      SQLAlchemy engine, session factory, Base
-│   └── security.py      Password hashing (bcrypt) + JWT create/verify
-├── models/               One SQLAlchemy model per entity + SyncMixin
-├── schemas/              Pydantic request/response models
-├── api/
-│   ├── deps.py           get_current_user, require_roles
-│   └── v1/               One router per resource + the aggregator
-└── services/             Business logic kept out of the route handlers
-    ├── auth_service.py
-    ├── sync_service.py    The conflict-detection policy — see its docstring
-    └── report_service.py
-alembic/                  Migrations (env.py wired to app.core.config)
-scripts/seed.py            Creates a sample clinic + 3 users for local dev
-tests/                     36 tests, ~90% coverage, run against real Postgres
-```
+Sync requests are limited to the same entity permissions as the corresponding
+resource endpoints. Self-registration creates a `registry_officer` account and
+requires an existing `clinic_id`. Administrators can create accounts with
+arbitrary roles through `POST /api/v1/users`.
 
 ## Local setup
 
-1. **Install [uv](https://docs.astral.sh/uv/)** if you don't have it:
-   ```bash
-   curl -LsSf https://astral.sh/uv/install.sh | sh
-   ```
+1. Start PostgreSQL and create an application database. For example:
 
-2. **Start PostgreSQL** (two databases: one for the app, one for tests):
    ```bash
    docker run --name health-chart-db -e POSTGRES_PASSWORD=devpassword \
      -p 5432:5432 -d postgres:16
@@ -64,68 +34,56 @@ tests/                     36 tests, ~90% coverage, run against real Postgres
      "CREATE USER health_chart WITH PASSWORD 'devpassword' CREATEDB;"
    docker exec -it health-chart-db psql -U postgres -c \
      "CREATE DATABASE health_chart OWNER health_chart;"
-   docker exec -it health-chart-db psql -U postgres -c \
-     "CREATE DATABASE health_chart_test OWNER health_chart;"
    ```
 
-3. **Configure environment**:
-   ```bash
-   cp .env.example .env
-   ```
+2. Copy `.env.example` to `.env`, configure `DATABASE_URL`, and replace
+   `SECRET_KEY` with a unique random secret. Never commit `.env`; rotate its
+   signing key if it has been shared.
 
-4. **Install dependencies and run migrations**:
+3. Install dependencies, migrate the database, and optionally seed local data:
+
    ```bash
    uv sync
    uv run alembic upgrade head
-   ```
-
-5. **Seed some local data** (optional, but the fastest way to get a login):
-   ```bash
    uv run python -m scripts.seed
    ```
-   Creates one clinic and three users, all with password `password123`
-   except the admin (`r.mwape` / `adminpass123`).
 
-6. **Run it**:
+   The idempotent seed command creates one clinic and four role-specific
+   sample users. The administrator is `r.mwape` / `adminpass123`; other sample
+   accounts use `password123`. Do not use these credentials in production.
+
+4. Run the server:
+
    ```bash
    uv run fastapi dev app/main.py
    ```
-   Visit `http://127.0.0.1:8000/docs` for the interactive API docs.
+
+   Open `http://127.0.0.1:8000/docs` for the API documentation.
 
 ## Running tests
 
 ```bash
-DATABASE_URL=postgresql+psycopg://health_chart:devpassword@localhost:5432/health_chart_test \
-  uv run alembic upgrade head   # once, to create the test DB's schema
-
-uv run pytest                       # run the suite
-uv run pytest --cov=app --cov-report=term-missing   # with coverage
+uv run pytest
 ```
 
-Each test runs inside a transaction that's rolled back afterwards, so the
-suite can be run repeatedly without resetting the database by hand.
+Tests use an isolated in-memory SQLite database and do not require a running
+PostgreSQL instance.
 
-## Adding a migration
+## Container
+
+Build the API image from the repository root:
+
+```bash
+docker build -f dockerfile -t health-chart-api .
+```
+
+## Migrations
 
 After changing a model in `app/models/`:
+
 ```bash
 uv run alembic revision --autogenerate -m "describe the change"
 uv run alembic upgrade head
 ```
-Always read the generated migration file before applying it — autogenerate
-is a strong starting point, not a guarantee.
 
-## The sync protocol, briefly
-
-- `POST /api/v1/sync/push` — a device sends a batch of locally
-  created/edited records (each carrying its own client-generated UUID and
-  version number). Each item comes back as `created`, `updated`,
-  `conflict`, or `rejected`.
-- `GET /api/v1/sync/pull?since=<timestamp>` — returns every record changed
-  after `since`, across all syncable entities.
-- `POST /api/v1/sync/conflicts/{entity_type}/{entity_id}/resolve` — applies
-  a staff member's manual "keep this device's version" / "keep server
-  version" decision.
-
-The full conflict-detection policy is documented in the docstring at the
-top of `app/services/sync_service.py`.
+Review generated migrations before applying them.

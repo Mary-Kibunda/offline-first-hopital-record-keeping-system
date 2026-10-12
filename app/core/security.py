@@ -9,7 +9,7 @@ bcrypt only considers the first 72 bytes of a password, so input is truncated
 to that length explicitly rather than letting the library raise.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import bcrypt
 from fastapi import HTTPException, status
@@ -26,7 +26,8 @@ def _password_bytes(password: str) -> bytes:
 
 
 def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    """Backward-compatible alias for the application's bcrypt hasher."""
+    return get_password_hash(password)
 
 
 def get_password_hash(password: str) -> str:
@@ -52,10 +53,10 @@ def create_access_token(
     """Return a signed JWT containing the subject and optional extra claims."""
     to_encode = {"sub": subject, **(extra_claims or {})}
 
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
+    if expires_delta is not None:
+        expire = datetime.now(timezone.utc) + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(minutes=15)
+        expire = datetime.now(timezone.utc) + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
 
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)

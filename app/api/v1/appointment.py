@@ -1,14 +1,20 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_roles
+from app.api.policies import CLINICAL_AND_REGISTRY
 from app.core.database import get_db
 from app.models.appointment import Appointment
 from app.models.mixins import new_uuid
 from app.models.user import User
 from app.schemas.appointment import AppointmentCreate, AppointmentRead, AppointmentUpdate
+from app.services.references import MissingReferenceError, validate_references
 
-router = APIRouter(prefix="/appointments", tags=["appointments"])
+router = APIRouter(
+    prefix="/appointments",
+    tags=["appointments"],
+    dependencies=[Depends(require_roles(*CLINICAL_AND_REGISTRY))],
+)
 
 
 @router.post("", response_model=AppointmentRead, status_code=status.HTTP_201_CREATED)
@@ -18,6 +24,11 @@ def create_appointment(
     appointment_id = payload.id or new_uuid()
     if db.get(Appointment, appointment_id) is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="An appointment with this id already exists.")
+
+    try:
+        validate_references(db, Appointment, payload.model_dump(exclude={"id"}))
+    except MissingReferenceError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
     appointment = Appointment(id=appointment_id, **payload.model_dump(exclude={"id"}))
     db.add(appointment)
