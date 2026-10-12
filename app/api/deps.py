@@ -80,3 +80,6 @@ def require_roles(*allowed_roles: UserRole) -> Callable[[User], User]:
         return current_user
 
     return _check
+
+
+require_admin = require_roles(UserRole.administrator)

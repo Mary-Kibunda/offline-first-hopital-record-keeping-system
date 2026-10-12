@@ -1,72 +1,63 @@
-"""Shared pytest fixtures.
+"""Isolated SQLite fixtures for API and service tests."""
 
-The API talks to Postgres in production, but the tests drive it through an
-in-memory SQLite database by overriding the ``get_db`` dependency. That keeps
-the suite fast and dependency-free while still exercising the real routes,
-dependency wiring and role guards.
-"""
-
-"""
-Shared pytest fixtures.
-
-Tests run against a real PostgreSQL database (health_chart), not
-SQLite-in-memory — this project's schema uses PostgreSQL-specific behaviour
-in a few places (portable-but-still-checked enum columns, timezone-aware
-DateTime columns), and testing against a different database engine than
-production risks passing tests that would fail for real. Each test runs
-inside a transaction that is rolled back afterwards, so tests never leak
-data into one another and the suite can run repeatedly without resetting
-the database by hand.
-"""
 import os
 from collections.abc import Generator
+from datetime import date
+
+os.environ.update(
+    {
+        "DATABASE_URL": "sqlite+pysqlite:///:memory:",
+        "SECRET_KEY": "test-only-signing-key-never-use-in-production",
+        "ALGORITHM": "HS256",
+        "ACCESS_TOKEN_EXPIRE_MINUTES": "480",
+    }
+)
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
-os.environ.setdefault(
-    "DATABASE_URL", "postgresql+psycopg://postgres:cookie45%3F%21@localhost:5432/health_chart"
+from app.api.deps import get_current_user
+from app.core.database import Base, get_db
+from app.core.security import hash_password
+from app.main import app
+from app.models.clinic import Clinic
+from app.models.patient import Gender, Patient
+from app.models.user import User, UserRole
+
+engine = create_engine(
+    "sqlite+pysqlite:///:memory:",
+    connect_args={"check_same_thread": False},
+    poolclass=StaticPool,
 )
-os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-local-dev-only")
 
-from app.api.deps import get_current_user  # noqa: E402
-from app.core.database import Base, get_db  # noqa: E402
-from app.core.security import hash_password  # noqa: E402
-from app.main import app  # noqa: E402
-from app.models.clinic import Clinic  # noqa: E402
-from app.models.user import User, UserRole  # noqa: E402
 
-TEST_DATABASE_URL = os.environ["DATABASE_URL"]
+@event.listens_for(engine, "connect")
+def _enable_sqlite_foreign_keys(connection, _record) -> None:
+    cursor = connection.cursor()
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
 
-engine = create_engine(TEST_DATABASE_URL, future=True)
+
 TestSessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _create_schema() -> Generator[None, None, None]:
-    """Tables already exist (created via Alembic against health_chart);
-    this just guarantees they're there even if someone runs the suite
-    against a fresh database, without duplicating Alembic's migration
-    logic."""
     import app.models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
     yield
+    Base.metadata.drop_all(bind=engine)
 
 
 @pytest.fixture
 def db_session() -> Generator[Session, None, None]:
-    """
-    One session per test, wrapped in a transaction that is always rolled
-    back — so every test starts from a clean slate without needing to
-    truncate tables manually.
-    """
     connection = engine.connect()
     transaction = connection.begin()
     session = TestSessionLocal(bind=connection)
-
     try:
         yield session
     finally:
@@ -77,15 +68,15 @@ def db_session() -> Generator[Session, None, None]:
 
 @pytest.fixture
 def client(db_session: Session) -> Generator[TestClient, None, None]:
-    """A TestClient whose requests use the same rolled-back-per-test session."""
-
     def _override_get_db() -> Generator[Session, None, None]:
         yield db_session
 
     app.dependency_overrides[get_db] = _override_get_db
-    with TestClient(app) as test_client:
-        yield test_client
-    app.dependency_overrides.clear()
+    try:
+        with TestClient(app) as test_client:
+            yield test_client
+    finally:
+        app.dependency_overrides.clear()
 
 
 @pytest.fixture
@@ -125,24 +116,47 @@ def sample_registry_officer(db_session: Session, sample_clinic: Clinic) -> User:
 
 
 @pytest.fixture
+def sample_patient(db_session: Session, sample_clinic: Clinic) -> Patient:
+    patient = Patient(
+        registered_clinic_id=sample_clinic.id,
+        first_name="Mwamba",
+        last_name="Banda",
+        date_of_birth=date(1990, 1, 1),
+        gender=Gender.male,
+    )
+    db_session.add(patient)
+    db_session.flush()
+    return patient
+
+
+@pytest.fixture
 def auth_client(client: TestClient, sample_registry_officer: User) -> Generator[TestClient, None, None]:
-    """A TestClient pre-authenticated as a registry officer."""
-
-    def _override_current_user() -> User:
-        return sample_registry_officer
-
-    app.dependency_overrides[get_current_user] = _override_current_user
+    app.dependency_overrides[get_current_user] = lambda: sample_registry_officer
     yield client
     app.dependency_overrides.pop(get_current_user, None)
 
 
 @pytest.fixture
 def admin_client(client: TestClient, sample_admin: User) -> Generator[TestClient, None, None]:
-    """A TestClient pre-authenticated as an administrator."""
-
-    def _override_current_user() -> User:
-        return sample_admin
-
-    app.dependency_overrides[get_current_user] = _override_current_user
+    app.dependency_overrides[get_current_user] = lambda: sample_admin
     yield client
+    app.dependency_overrides.pop(get_current_user, None)
+
+
+@pytest.fixture
+def with_role(client: TestClient, db_session: Session, sample_clinic: Clinic):
+    def _use_role(role: UserRole) -> User:
+        user = User(
+            name=role.value.replace("_", " ").title(),
+            username=f"test-{role.value}",
+            role=role,
+            clinic_id=sample_clinic.id,
+            password_hash=hash_password("password123"),
+        )
+        db_session.add(user)
+        db_session.flush()
+        app.dependency_overrides[get_current_user] = lambda: user
+        return user
+
+    yield _use_role
     app.dependency_overrides.pop(get_current_user, None)

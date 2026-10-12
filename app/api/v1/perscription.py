@@ -1,14 +1,20 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_roles
+from app.api.policies import PRESCRIBING
 from app.core.database import get_db
 from app.models.mixins import new_uuid
 from app.models.perscription import Prescription
 from app.models.user import User
 from app.schemas.perscription import PrescriptionCreate, PrescriptionRead
+from app.services.references import MissingReferenceError, validate_references
 
-router = APIRouter(prefix="/prescriptions", tags=["prescriptions"])
+router = APIRouter(
+    prefix="/prescriptions",
+    tags=["prescriptions"],
+    dependencies=[Depends(require_roles(*PRESCRIBING))],
+)
 
 
 @router.post("", response_model=PrescriptionRead, status_code=status.HTTP_201_CREATED)
@@ -18,6 +24,11 @@ def create_prescription(
     prescription_id = payload.id or new_uuid()
     if db.get(Prescription, prescription_id) is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A prescription with this id already exists.")
+
+    try:
+        validate_references(db, Prescription, payload.model_dump(exclude={"id"}))
+    except MissingReferenceError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
     prescription = Prescription(id=prescription_id, **payload.model_dump(exclude={"id"}))
     db.add(prescription)
