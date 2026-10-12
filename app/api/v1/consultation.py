@@ -1,14 +1,20 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_roles
+from app.api.policies import CLINICAL
 from app.core.database import get_db
 from app.models.consultation import Consultation
 from app.models.mixins import new_uuid, utcnow
 from app.models.user import User
 from app.schemas.consultation import ConsultationCreate, ConsultationRead, ConsultationUpdate
+from app.services.references import MissingReferenceError, validate_references
 
-router = APIRouter(prefix="/consultations", tags=["consultations"])
+router = APIRouter(
+    prefix="/consultations",
+    tags=["consultations"],
+    dependencies=[Depends(require_roles(*CLINICAL))],
+)
 
 
 @router.post("", response_model=ConsultationRead, status_code=status.HTTP_201_CREATED)
@@ -22,6 +28,11 @@ def create_consultation(
     data = payload.model_dump(exclude={"id"})
     if data.get("visit_date") is None:
         data["visit_date"] = utcnow()
+
+    try:
+        validate_references(db, Consultation, data)
+    except MissingReferenceError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
     consultation = Consultation(id=consultation_id, **data)
     db.add(consultation)

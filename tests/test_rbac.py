@@ -1,226 +1,192 @@
-"""Role based access control tests.
+from datetime import datetime, timedelta, timezone
 
-These exercise the guards end to end through the HTTP layer: who can log in,
-who can reach the admin surface, and the self-protection rules that stop an
-admin locking themselves out.
-"""
+import pytest
+from fastapi.testclient import TestClient
+from jose import jwt
 
-from app.models.enums import UserRole
-from conftest import API, DEFAULT_PASSWORD, auth_headers, create_user
+from app.core.config import settings
+from app.models.user import User, UserRole
 
 
-def test_public_registration_defaults_to_standard_user(client):
-    """A caller cannot self-assign the admin role at registration."""
+@pytest.mark.parametrize(
+    ("role", "allowed"),
+    [
+        (
+            UserRole.registry_officer,
+            {"/patients", "/appointments", "/sync/pull"},
+        ),
+        (
+            UserRole.clinician,
+            {"/patients", "/appointments", "/consultations", "/prescriptions", "/sync/pull"},
+        ),
+        (
+            UserRole.pharmacist,
+            {"/prescriptions", "/drug-stock", "/sync/pull"},
+        ),
+        (
+            UserRole.administrator,
+            {
+                "/patients",
+                "/appointments",
+                "/consultations",
+                "/prescriptions",
+                "/drug-stock",
+                "/users",
+                "/reports",
+                "/sync/pull",
+            },
+        ),
+    ],
+)
+def test_role_access_matrix(client: TestClient, with_role, role: UserRole, allowed: set[str]) -> None:
+    with_role(role)
+    paths = (
+        "/patients",
+        "/appointments",
+        "/consultations",
+        "/prescriptions",
+        "/drug-stock",
+        "/users",
+        "/reports",
+        "/sync/pull",
+    )
+    for path in paths:
+        expected = 200 if path in allowed else 403
+        assert client.get(f"/api/v1{path}").status_code == expected, f"{role.value} -> {path}"
+
+
+def test_registration_creates_registry_officer(client: TestClient, sample_clinic) -> None:
     response = client.post(
-        f"{API}/auth/register",
+        "/api/v1/auth/register",
         json={
-            "email": "alice@example.com",
+            "name": "Alice Banda",
             "username": "alice",
-            "password": DEFAULT_PASSWORD,
-            "role": "admin",
+            "password": "securepass123",
+            "clinic_id": sample_clinic.id,
         },
     )
     assert response.status_code == 201, response.text
     body = response.json()
-    assert body["role"] == "user"
+    assert body["role"] == UserRole.registry_officer.value
     assert body["is_active"] is True
+    assert "password_hash" not in body
 
 
-def test_registration_rejects_duplicate_email(client, db_session):
-    create_user(db_session, "bob@example.com")
+def test_registration_cannot_assign_a_role(client: TestClient, sample_clinic) -> None:
     response = client.post(
-        f"{API}/auth/register",
-        json={"email": "bob@example.com", "username": "bob", "password": DEFAULT_PASSWORD},
+        "/api/v1/auth/register",
+        json={
+            "name": "Root User",
+            "username": "root-attempt",
+            "password": "securepass123",
+            "clinic_id": sample_clinic.id,
+            "role": UserRole.administrator.value,
+        },
+    )
+    assert response.status_code == 422
+
+
+def test_registration_rejects_duplicate_username(client: TestClient, sample_registry_officer: User) -> None:
+    response = client.post(
+        "/api/v1/auth/register",
+        json={
+            "name": "Duplicate User",
+            "username": sample_registry_officer.username,
+            "password": "securepass123",
+            "clinic_id": sample_registry_officer.clinic_id,
+        },
     )
     assert response.status_code == 409
 
 
-def test_login_and_me_round_trip(client, db_session):
-    create_user(db_session, "carol@example.com")
-    headers = auth_headers(client, "carol@example.com")
-    response = client.get(f"{API}/auth/me", headers=headers)
-    assert response.status_code == 200
-    body = response.json()
-    assert body["email"] == "carol@example.com"
-    assert body["role"] == "user"
-
-
-def test_login_with_wrong_password_is_rejected(client, db_session):
-    create_user(db_session, "dave@example.com")
+def test_registration_rejects_unknown_clinic(client: TestClient) -> None:
     response = client.post(
-        f"{API}/auth/login",
-        data={"username": "dave@example.com", "password": "totally-wrong"},
-    )
-    assert response.status_code == 401
-
-
-def test_anonymous_cannot_list_users(client):
-    response = client.get(f"{API}/users")
-    assert response.status_code in (401, 403)
-
-
-def test_standard_user_cannot_list_users(client, db_session):
-    create_user(db_session, "erin@example.com")
-    headers = auth_headers(client, "erin@example.com")
-    response = client.get(f"{API}/users", headers=headers)
-    assert response.status_code == 403
-
-
-def test_standard_user_cannot_create_admin(client, db_session):
-    create_user(db_session, "frank@example.com")
-    headers = auth_headers(client, "frank@example.com")
-    response = client.post(
-        f"{API}/users",
-        headers=headers,
+        "/api/v1/auth/register",
         json={
-            "email": "wannabe-admin@example.com",
-            "username": "wannabe",
-            "password": DEFAULT_PASSWORD,
-            "role": "admin",
+            "name": "No Clinic",
+            "username": "no-clinic",
+            "password": "securepass123",
+            "clinic_id": "missing-clinic-id",
         },
     )
-    assert response.status_code == 403
+    assert response.status_code == 404
 
 
-def test_standard_user_cannot_reach_reports_surface(client, db_session):
-    """Any admin-only path must reject a standard user, not just /users."""
-    create_user(db_session, "george@example.com")
-    headers = auth_headers(client, "george@example.com")
-    response = client.get(f"{API}/users/00000000-0000-0000-0000-000000000000", headers=headers)
-    assert response.status_code == 403
-
-
-def test_admin_can_list_users(client, db_session):
-    create_user(db_session, "root@example.com", role=UserRole.ADMIN)
-    create_user(db_session, "user1@example.com", role=UserRole.USER)
-    headers = auth_headers(client, "root@example.com")
-    response = client.get(f"{API}/users", headers=headers)
-    assert response.status_code == 200
-    emails = {user["email"] for user in response.json()}
-    assert {"root@example.com", "user1@example.com"} <= emails
-
-
-def test_admin_can_filter_users_by_role(client, db_session):
-    create_user(db_session, "root@example.com", role=UserRole.ADMIN)
-    create_user(db_session, "plain@example.com", role=UserRole.USER)
-    headers = auth_headers(client, "root@example.com")
-    response = client.get(f"{API}/users", headers=headers, params={"role": "admin"})
-    assert response.status_code == 200
-    roles = {user["role"] for user in response.json()}
-    assert roles == {"admin"}
-
-
-def test_admin_can_create_user_with_explicit_role(client, db_session):
-    create_user(db_session, "root@example.com", role=UserRole.ADMIN)
-    headers = auth_headers(client, "root@example.com")
+def test_login_token_uses_configured_expiration(
+    client: TestClient, sample_registry_officer: User
+) -> None:
     response = client.post(
-        f"{API}/users",
-        headers=headers,
-        json={
-            "email": "newadmin@example.com",
-            "username": "newadmin",
-            "password": DEFAULT_PASSWORD,
-            "role": "admin",
-        },
+        "/api/v1/auth/login",
+        data={"username": sample_registry_officer.username, "password": "password123"},
     )
-    assert response.status_code == 201, response.text
-    assert response.json()["role"] == "admin"
+    assert response.status_code == 200
 
-
-def test_admin_can_promote_user_and_grant_access(client, db_session):
-    create_user(db_session, "root@example.com", role=UserRole.ADMIN)
-    target = create_user(db_session, "grace@example.com", role=UserRole.USER)
-    admin_headers = auth_headers(client, "root@example.com")
-    target_headers = auth_headers(client, "grace@example.com")
-
-    assert client.get(f"{API}/users", headers=target_headers).status_code == 403
-
-    response = client.patch(
-        f"{API}/users/{target.id}/role",
-        headers=admin_headers,
-        json={"role": "admin"},
+    claims = jwt.decode(
+        response.json()["access_token"],
+        settings.SECRET_KEY,
+        algorithms=[settings.ALGORITHM],
     )
-    assert response.status_code == 200, response.text
-    assert response.json()["role"] == "admin"
+    expires_at = datetime.fromtimestamp(claims["exp"], timezone.utc)
+    remaining = expires_at - datetime.now(timezone.utc)
+    assert timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES) - timedelta(seconds=5) <= remaining
+    assert remaining <= timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
 
-    assert client.get(f"{API}/users", headers=target_headers).status_code == 200
 
-
-def test_admin_cannot_demote_self(client, db_session):
-    admin = create_user(db_session, "root@example.com", role=UserRole.ADMIN)
-    headers = auth_headers(client, "root@example.com")
-    response = client.patch(
-        f"{API}/users/{admin.id}/role",
-        headers=headers,
-        json={"role": "user"},
+def test_admin_cannot_demote_or_deactivate_self(admin_client: TestClient, sample_admin: User) -> None:
+    role_response = admin_client.patch(
+        f"/api/v1/users/{sample_admin.id}",
+        json={"role": UserRole.clinician.value},
     )
-    assert response.status_code == 400
+    deactivate_response = admin_client.patch(
+        f"/api/v1/users/{sample_admin.id}",
+        json={"is_active": False},
+    )
+    delete_response = admin_client.delete(f"/api/v1/users/{sample_admin.id}")
+    assert role_response.status_code == 400
+    assert deactivate_response.status_code == 400
+    assert delete_response.status_code == 400
 
 
-def test_deactivated_user_is_locked_out(client, db_session):
-    create_user(db_session, "root@example.com", role=UserRole.ADMIN)
-    target = create_user(db_session, "henry@example.com", role=UserRole.USER)
-    admin_headers = auth_headers(client, "root@example.com")
-    target_headers = auth_headers(client, "henry@example.com")
-
-    response = client.patch(
-        f"{API}/users/{target.id}/status",
-        headers=admin_headers,
+def test_admin_can_update_another_user(admin_client: TestClient, sample_registry_officer: User) -> None:
+    response = admin_client.patch(
+        f"/api/v1/users/{sample_registry_officer.id}",
         json={"is_active": False},
     )
     assert response.status_code == 200
     assert response.json()["is_active"] is False
 
-    # The already issued token is refused on the next request...
-    assert client.get(f"{API}/auth/me", headers=target_headers).status_code == 403
-    # ...and a fresh login is refused too.
-    login_response = client.post(
-        f"{API}/auth/login",
-        data={"username": "henry@example.com", "password": DEFAULT_PASSWORD},
+
+def test_pharmacist_sync_does_not_receive_patient_records(
+    client: TestClient, with_role, sample_patient
+) -> None:
+    with_role(UserRole.pharmacist)
+    response = client.get("/api/v1/sync/pull")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["patients"] == []
+    assert body["consultations"] == []
+    assert body["appointments"] == []
+    assert body["drug_stock"] == []
+
+
+def test_registry_officer_cannot_push_drug_stock(
+    client: TestClient, with_role
+) -> None:
+    with_role(UserRole.registry_officer)
+    response = client.post(
+        "/api/v1/sync/push",
+        json={
+            "device_id": "device-1",
+            "items": [
+                {
+                    "entity_type": "drug_stock",
+                    "data": {
+                        "clinic_id": "clinic-id",
+                        "drug_name": "Paracetamol",
+                        "quantity_available": 10,
+                    },
+                }
+            ],
+        },
     )
-    assert login_response.status_code == 403
-
-
-def test_admin_cannot_deactivate_self(client, db_session):
-    admin = create_user(db_session, "root@example.com", role=UserRole.ADMIN)
-    headers = auth_headers(client, "root@example.com")
-    response = client.patch(
-        f"{API}/users/{admin.id}/status",
-        headers=headers,
-        json={"is_active": False},
-    )
-    assert response.status_code == 400
-
-
-def test_admin_can_delete_user(client, db_session):
-    create_user(db_session, "root@example.com", role=UserRole.ADMIN)
-    target = create_user(db_session, "ivy@example.com", role=UserRole.USER)
-    headers = auth_headers(client, "root@example.com")
-
-    assert client.delete(f"{API}/users/{target.id}", headers=headers).status_code == 204
-    assert client.get(f"{API}/users/{target.id}", headers=headers).status_code == 404
-
-
-def test_admin_cannot_delete_self(client, db_session):
-    admin = create_user(db_session, "root@example.com", role=UserRole.ADMIN)
-    headers = auth_headers(client, "root@example.com")
-    assert client.delete(f"{API}/users/{admin.id}", headers=headers).status_code == 400
-
-
-def test_admin_can_change_user_password(client, db_session):
-    create_user(db_session, "root@example.com", role=UserRole.ADMIN)
-    target = create_user(db_session, "jill@example.com", role=UserRole.USER)
-    headers = auth_headers(client, "root@example.com")
-
-    response = client.patch(
-        f"{API}/users/{target.id}",
-        headers=headers,
-        json={"password": "brandnewpass1"},
-    )
-    assert response.status_code == 200, response.text
-
-    login_response = client.post(
-        f"{API}/auth/login",
-        data={"username": "jill@example.com", "password": "brandnewpass1"},
-    )
-    assert login_response.status_code == 200
+    assert response.status_code == 403

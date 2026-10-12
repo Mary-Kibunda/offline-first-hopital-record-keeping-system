@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings
-from pydantic import PostgresDsn
+from pydantic import Field
 
 class Settings(BaseSettings):
     #application settings for the offline-first hospital record keeping system
@@ -9,14 +9,14 @@ class Settings(BaseSettings):
 
     #security settings for the offline-first hospital record keeping system
     SECRET_KEY: str
-    ALGORITHM: str
-    ACCESS_TOKEN_EXPIRE_MINUTES: int
+    ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=480, gt=0)
 
     #debug flag, surfaced from the environment file
     DEBUG: bool = False
 
     #database settings for the offline-first hospital record keeping system
-    DATABASE_URL: PostgresDsn
+    DATABASE_URL: str
 
     #CORS settings for the offline-first hospital record keeping system
     BACKEND_CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:8000", "http://localhost:8080"]
