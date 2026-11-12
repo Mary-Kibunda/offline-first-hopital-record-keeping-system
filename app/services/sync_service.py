@@ -40,6 +40,7 @@ from app.schemas.drug_stock import DrugStockCreate
 from app.schemas.patient import PatientCreate
 from app.schemas.perscription import PrescriptionCreate
 from app.schemas.sync import SyncPushItem, SyncPushResult
+from app.services.references import MissingReferenceError, validate_references
 
 _REGISTRY: dict[str, tuple[type, type[BaseModel]]] = {
     "patient": (Patient, PatientCreate),
@@ -72,158 +73,7 @@ def _entity_fields_differ(existing: Any, incoming_fields: dict[str, Any]) -> boo
     return False
 
 
-def _rejected(entity_type: str, entity_id: str, detail: str) -> SyncPushResult:
-    return SyncPushResult(
-        entity_type=entity_type,  # type: ignore[arg-type]
-        entity_id=entity_id,
-        status="rejected",
-        detail=detail,
-    )
-
-
-def _validate_clinic_scope(
-    db: Session,
-    entity_type: str,
-    fields: dict[str, Any],
-    current_user: User,
-) -> str | None:
-    if current_user.role == UserRole.administrator:
-        return None
-
-    clinic_id = current_user.clinic_id
-    if entity_type == "patient":
-        return (
-            None
-            if fields.get("registered_clinic_id") == clinic_id
-            else "You can only sync patients from your assigned clinic."
-        )
-    if entity_type in ("appointment", "consultation"):
-        patient = db.get(Patient, fields.get("patient_id"))
-        if patient is None or patient.registered_clinic_id != clinic_id:
-            return "The linked patient is outside your clinic."
-        staff = db.get(User, fields.get("staff_id"))
-        if staff is None or staff.clinic_id != clinic_id:
-            return "The assigned staff member is outside your clinic."
-        return None
-    if entity_type == "prescription":
-        consultation = db.get(Consultation, fields.get("consultation_id"))
-        stock = db.get(DrugStock, fields.get("drug_id"))
-        if (
-            consultation is None
-            or consultation.patient.registered_clinic_id != clinic_id
-            or stock is None
-            or stock.clinic_id != clinic_id
-        ):
-            return "The prescription references data outside your clinic."
-        if fields.get("picked_up"):
-            dispenser = db.get(User, fields.get("picked_up_by_user_id"))
-            if (
-                dispenser is None
-                or dispenser.role != UserRole.pharmacist
-                or dispenser.clinic_id != clinic_id
-            ):
-                return "A pickup must be recorded by a pharmacist at this clinic."
-        return None
-    if entity_type == "drug_stock":
-        if current_user.role != UserRole.pharmacist:
-            return "Only administrators and pharmacists can sync drug stock."
-        return (
-            None
-            if fields.get("clinic_id") == clinic_id
-            else "You can only sync drug stock from your assigned clinic."
-        )
-    return "Unknown entity type."
-
-
-def _record_in_scope(
-    db: Session,
-    entity_type: str,
-    record: Any,
-    current_user: User,
-) -> bool:
-    if current_user.role == UserRole.administrator:
-        return True
-    if entity_type == "patient":
-        return record.registered_clinic_id == current_user.clinic_id
-    if entity_type == "appointment":
-        patient = db.get(Patient, record.patient_id)
-        return patient is not None and patient.registered_clinic_id == current_user.clinic_id
-    if entity_type == "consultation":
-        patient = db.get(Patient, record.patient_id)
-        return patient is not None and patient.registered_clinic_id == current_user.clinic_id
-    if entity_type == "prescription":
-        consultation = db.get(Consultation, record.consultation_id)
-        stock = db.get(DrugStock, record.drug_id)
-        return (
-            consultation is not None
-            and stock is not None
-            and consultation.patient.registered_clinic_id == current_user.clinic_id
-            and stock.clinic_id == current_user.clinic_id
-        )
-    if entity_type == "drug_stock":
-        return record.clinic_id == current_user.clinic_id
-    return False
-
-
-def _scope_sync_query(db: Session, entity_type: str, query, current_user: User):
-    if current_user.role == UserRole.administrator:
-        return query
-    if entity_type == "patient":
-        return query.filter(Patient.registered_clinic_id == current_user.clinic_id)
-    if entity_type == "appointment":
-        return query.join(Patient, Appointment.patient_id == Patient.id).filter(
-            Patient.registered_clinic_id == current_user.clinic_id
-        )
-    if entity_type == "consultation":
-        return query.join(Patient, Consultation.patient_id == Patient.id).filter(
-            Patient.registered_clinic_id == current_user.clinic_id
-        )
-    if entity_type == "prescription":
-        return (
-            query.join(Consultation, Prescription.consultation_id == Consultation.id)
-            .join(Patient, Consultation.patient_id == Patient.id)
-            .join(DrugStock, Prescription.drug_id == DrugStock.id)
-            .filter(Patient.registered_clinic_id == current_user.clinic_id)
-            .filter(DrugStock.clinic_id == current_user.clinic_id)
-        )
-    if entity_type == "drug_stock":
-        return query.filter(DrugStock.clinic_id == current_user.clinic_id)
-    return query.filter(False)
-
-
-def _decrement_stock_for_prescription(
-    db: Session,
-    fields: dict[str, Any],
-) -> str | None:
-    consultation = db.get(Consultation, fields.get("consultation_id"))
-    stock = (
-        db.query(DrugStock)
-        .filter(DrugStock.id == fields.get("drug_id"))
-        .with_for_update()
-        .first()
-    )
-    if consultation is None or stock is None:
-        return "The prescription or its stock entry could not be found."
-    if stock.clinic_id != consultation.patient.registered_clinic_id:
-        return "The prescription drug belongs to a different clinic."
-    if stock.quantity_available < fields.get("quantity", 0):
-        return "There is not enough stock to dispense this prescription."
-
-    stock.quantity_available -= fields["quantity"]
-    stock.version += 1
-    stock.updated_at = utcnow()
-    stock.sync_status = SyncStatus.synced
-    return None
-
-
-def push_item(
-    db: Session,
-    device_id: str,
-    user_id: str,
-    item: SyncPushItem,
-    *,
-    current_user: User | None = None,
-) -> SyncPushResult:
+def push_item(db: Session, device_id: str, user_id: str, item: SyncPushItem) -> SyncPushResult:
     """Apply one queued record to the database, per the policy above."""
     registry_entry = _REGISTRY.get(item.entity_type)
     if registry_entry is None:
@@ -246,6 +96,15 @@ def push_item(
             detail=f"Validation failed: {exc.errors()}",
         )
     clean_fields = validated.model_dump(exclude={"id"})
+    try:
+        validate_references(db, model_cls, clean_fields)
+    except MissingReferenceError as exc:
+        return SyncPushResult(
+            entity_type=item.entity_type,
+            entity_id=entity_id,
+            status="rejected",
+            detail=str(exc),
+        )
 
     existing = db.get(model_cls, entity_id)
     if current_user is not None:
@@ -369,15 +228,16 @@ def _log(
 def pull_updates(
     db: Session,
     since: datetime | None,
-    *,
-    current_user: User | None = None,
+    entity_types: frozenset[str] | set[str] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """
-    Return every record across all syncable entities updated after `since`
-    (or everything, if `since` is None — a device's very first sync).
+    Return allowed syncable records updated after `since` (or all allowed
+    records when `since` is None — a device's very first sync).
     """
     result: dict[str, list[dict[str, Any]]] = {}
     for entity_type, (model_cls, _schema_cls) in _REGISTRY.items():
+        if entity_types is not None and entity_type not in entity_types:
+            continue
         query = db.query(model_cls)
         if current_user is not None:
             query = _scope_sync_query(db, entity_type, query, current_user)
@@ -430,29 +290,7 @@ def resolve_conflict(
         entity_fields = {k: v for k, v in local_data.items() if k not in _SYNC_META_KEYS}
         validated = schema_cls.model_validate({**entity_fields, "id": entity_id})
         clean_fields = validated.model_dump(exclude={"id"})
-        if current_user is not None:
-            scope_error = _validate_clinic_scope(
-                db, entity_type, clean_fields, current_user
-            )
-            if scope_error:
-                raise ValueError(scope_error)
-        if entity_type == "prescription":
-            was_picked_up = bool(getattr(existing, "picked_up", False))
-            will_be_picked_up = bool(clean_fields.get("picked_up"))
-            if was_picked_up and not will_be_picked_up:
-                raise ValueError(
-                    "A picked-up prescription cannot be marked as not picked up."
-                )
-            if will_be_picked_up and not was_picked_up:
-                if current_user is None or current_user.role != UserRole.pharmacist:
-                    raise ValueError(
-                        "Only a pharmacist can resolve a pickup onto the server."
-                    )
-                dispense_error = _decrement_stock_for_prescription(
-                    db, clean_fields
-                )
-                if dispense_error:
-                    raise ValueError(dispense_error)
+        validate_references(db, model_cls, clean_fields)
         for key, value in clean_fields.items():
             setattr(existing, key, value)
         existing.version += 1

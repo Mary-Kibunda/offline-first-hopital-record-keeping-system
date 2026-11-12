@@ -9,8 +9,13 @@ from app.models.mixins import new_uuid
 from app.models.patient import Patient
 from app.models.user import User, UserRole
 from app.schemas.patient import PatientCreate, PatientRead, PatientUpdate
+from app.services.references import MissingReferenceError, validate_references
 
-router = APIRouter(prefix="/patients", tags=["patients"])
+router = APIRouter(
+    prefix="/patients",
+    tags=["patients"],
+    dependencies=[Depends(require_roles(*CLINICAL_AND_REGISTRY))],
+)
 
 
 @router.post("", response_model=PatientRead, status_code=status.HTTP_201_CREATED)
@@ -29,6 +34,11 @@ def create_patient(
     patient_id = payload.id or new_uuid()
     if db.get(Patient, patient_id) is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A patient with this id already exists.")
+
+    try:
+        validate_references(db, Patient, payload.model_dump(exclude={"id"}))
+    except MissingReferenceError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
     patient = Patient(id=patient_id, origin_device_id=None, **payload.model_dump(exclude={"id"}))
     db.add(patient)

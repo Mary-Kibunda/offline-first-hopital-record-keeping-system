@@ -9,6 +9,7 @@ from app.models.mixins import new_uuid, utcnow
 from app.models.patient import Patient
 from app.models.user import User, UserRole
 from app.schemas.consultation import ConsultationCreate, ConsultationRead, ConsultationUpdate
+from app.services.references import MissingReferenceError, validate_references
 
 router = APIRouter(prefix="/consultations", tags=["consultations"])
 
@@ -61,6 +62,11 @@ def create_consultation(
     data = payload.model_dump(exclude={"id"})
     if data.get("visit_date") is None:
         data["visit_date"] = utcnow()
+
+    try:
+        validate_references(db, Consultation, data)
+    except MissingReferenceError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
     consultation = Consultation(id=consultation_id, **data)
     db.add(consultation)

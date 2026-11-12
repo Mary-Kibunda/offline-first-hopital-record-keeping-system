@@ -7,7 +7,7 @@ parameter (FastAPI caches the result, so the guard still runs once).
 
 Guard rails worth noting:
 
-* an anonymous or standard ``user`` caller cannot reach any of this;
+* only an administrator can reach any of this;
 * an admin cannot remove their own admin role;
 * an admin cannot deactivate or delete their own account.
 """
@@ -15,18 +15,19 @@ Guard rails worth noting:
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy.orm import Session
 
-from app.api.deps import require_roles
+from app.api.deps import require_admin
 from app.core.database import get_db
 from app.core.security import get_password_hash
 from app.models.mixins import new_uuid
 from app.models.user import User, UserRole
 from app.services.email_service import send_welcome_email
 from app.schemas.user import UserCreate, UserRead, UserUpdate
+from app.services.references import MissingReferenceError, validate_references
 
 router = APIRouter(
     prefix="/users",
     tags=["users"],
-    dependencies=[Depends(require_roles(UserRole.administrator))],
+    dependencies=[Depends(require_admin)],
 )
 
 
@@ -75,7 +76,12 @@ def get_user(user_id: str, db: Session = Depends(get_db)) -> User:
 
 
 @router.patch("/{user_id}", response_model=UserRead)
-def update_user(user_id: str, payload: UserUpdate, db: Session = Depends(get_db)) -> User:
+def update_user(
+    user_id: str,
+    payload: UserUpdate,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(require_admin),
+) -> User:
     user = db.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
@@ -96,7 +102,11 @@ def update_user(user_id: str, payload: UserUpdate, db: Session = Depends(get_db)
 
 
 @router.delete("/{user_id}", response_model=UserRead)
-def remove_user_access(user_id: str, db: Session = Depends(get_db)) -> User:
+def remove_user_access(
+    user_id: str,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(require_admin),
+) -> User:
     """
     Removes a user's ability to log in without deleting their historical
     records (consultations/appointments they created stay exactly as they
@@ -107,6 +117,12 @@ def remove_user_access(user_id: str, db: Session = Depends(get_db)) -> User:
     user = db.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    if user.id == current_admin.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Administrators cannot deactivate their own account.",
+        )
 
     user.is_active = False
     user.version += 1

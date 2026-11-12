@@ -4,7 +4,8 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_roles
+from app.api.policies import SYNC_ROLES, sync_entities_for
 from app.core.database import get_db
 from app.models.sync_log import SyncLog
 from app.models.user import User, UserRole
@@ -24,13 +25,25 @@ from app.services.sync_service import (
     resolve_conflict,
 )
 
-router = APIRouter(prefix="/sync", tags=["sync"])
+router = APIRouter(
+    prefix="/sync",
+    tags=["sync"],
+    dependencies=[Depends(require_roles(*SYNC_ROLES))],
+)
 
 
 @router.post("/push", response_model=SyncPushResponse)
 def push(
     payload: SyncPushRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
 ) -> SyncPushResponse:
+    allowed_entities = sync_entities_for(current_user.role)
+    forbidden = sorted({item.entity_type for item in payload.items} - allowed_entities)
+    if forbidden:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"You do not have permission to sync: {', '.join(forbidden)}.",
+        )
+
     results: list[SyncPushResult] = []
     for item in payload.items:
         try:
@@ -77,6 +90,12 @@ def resolve(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> SyncPushResult:
+    if entity_type not in sync_entities_for(current_user.role):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to resolve conflicts for this entity type.",
+        )
+
     try:
         result = resolve_conflict(
             db,
