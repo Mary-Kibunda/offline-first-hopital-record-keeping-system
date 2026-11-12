@@ -50,6 +50,11 @@ def get_current_user(
     except JWTError as exc:
         raise _CREDENTIALS_ERROR from exc
 
+    # Password-reset tokens are signed with the same key; they must never be
+    # accepted as a login token.
+    if payload.get("purpose") is not None:
+        raise _CREDENTIALS_ERROR
+
     user_id = payload.get("sub")
     if user_id is None:
         raise _CREDENTIALS_ERROR

@@ -8,7 +8,7 @@ if TYPE_CHECKING:
 import enum
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String
+from sqlalchemy import DateTime, ForeignKey, Index, String, text
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -18,6 +18,7 @@ from app.models.mixins import SyncMixin
 
 class AppointmentStatus(str, enum.Enum):
     scheduled = "scheduled"
+    rescheduled = "rescheduled"
     completed = "completed"
     missed = "missed"
     cancelled = "cancelled"
@@ -25,6 +26,20 @@ class AppointmentStatus(str, enum.Enum):
 
 class Appointment(Base, SyncMixin):
     __tablename__ = "appointments"
+    __table_args__ = (
+        Index(
+            "uq_appointments_staff_scheduled_at_active",
+            "staff_id",
+            "scheduled_at",
+            unique=True,
+            postgresql_where=text(
+                "status IN ('scheduled', 'rescheduled') AND deleted_at IS NULL"
+            ),
+            sqlite_where=text(
+                "status IN ('scheduled', 'rescheduled') AND deleted_at IS NULL"
+            ),
+        ),
+    )
 
     patient_id: Mapped[str] = mapped_column(String(36), ForeignKey("patient.id"), nullable=False)
     staff_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False)

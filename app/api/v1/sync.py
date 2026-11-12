@@ -34,7 +34,13 @@ def push(
     results: list[SyncPushResult] = []
     for item in payload.items:
         try:
-            result = push_item(db, payload.device_id, current_user.id, item)
+            result = push_item(
+                db,
+                payload.device_id,
+                current_user.id,
+                item,
+                current_user=current_user,
+            )
         except UnknownEntityTypeError as exc:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Unknown entity_type: {exc}"
@@ -52,7 +58,7 @@ def pull(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> SyncPullResponse:
-    data = pull_updates(db, since)
+    data = pull_updates(db, since, current_user=current_user)
     return SyncPullResponse(
         server_time=datetime.now(timezone.utc),
         patients=data.get("patient", []),
@@ -73,7 +79,12 @@ def resolve(
 ) -> SyncPushResult:
     try:
         result = resolve_conflict(
-            db, entity_type, entity_id, keep_local=payload.keep_local, local_data=payload.local_data
+            db,
+            entity_type,
+            entity_id,
+            keep_local=payload.keep_local,
+            local_data=payload.local_data,
+            current_user=current_user,
         )
     except UnknownEntityTypeError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Unknown entity_type: {exc}") from exc

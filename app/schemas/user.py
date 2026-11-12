@@ -6,7 +6,7 @@ typed as :class:`app.models.enums.UserRole` so FastAPI validates and documents
 the allowed values automatically.
 """
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, EmailStr
 
 from app.models.user import UserRole
 from app.schemas.base import SyncMetadataOut
@@ -23,6 +23,7 @@ class UserBase(BaseModel):
 
 class UserCreate(UserBase):
     id: str | None = None
+    email: EmailStr
     password: str = Field(min_length=8)
 
     @field_validator("password")
@@ -39,17 +40,38 @@ class UserCreate(UserBase):
 
 class UserUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
+    email: EmailStr | None = None
     role: UserRole | None = None
     is_active: bool | None = None
 
 
 class UserRead(UserBase, SyncMetadataOut):
+    email: str | None = None
     is_active: bool
 
 
 class Token(BaseModel):
     access_token: str
     token_type: str = "bearer"
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str = Field(min_length=8)
+
+    @field_validator("new_password")
+    @classmethod
+    def password_fits_bcrypt(cls, value: str) -> str:
+        if len(value.encode("utf-8")) > _MAX_PASSWORD_BYTES:
+            raise ValueError(f"Password must be at most {_MAX_PASSWORD_BYTES} bytes.")
+        return value
+
+
+class MessageResponse(BaseModel):
+    detail: str
 
 
 class LoginRequest(BaseModel):

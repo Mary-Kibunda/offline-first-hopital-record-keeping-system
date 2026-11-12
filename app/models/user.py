@@ -30,6 +30,9 @@ class User(Base, SyncMixin):
     clinic_id: Mapped[str] = mapped_column(String(36), ForeignKey("clinics.id"), nullable=False)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     username: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True)
+    # Nullable so accounts created before email support still load; new accounts
+    # are required to have one (see UserCreate). Stored lower-cased.
+    email: Mapped[str | None] = mapped_column(String(254), nullable=True, unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(200), nullable=False)
     role: Mapped[UserRole] = mapped_column(
         SAEnum(UserRole, values_callable=lambda obj: [e.value for e in obj], native_enum=False),

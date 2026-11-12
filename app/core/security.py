@@ -10,6 +10,7 @@ to that length explicitly rather than letting the library raise.
 """
 
 from datetime import datetime, timedelta
+import hashlib
 
 import bcrypt
 from fastapi import HTTPException, status
@@ -34,6 +35,8 @@ def get_password_hash(password: str) -> str:
     hashed = bcrypt.hashpw(_password_bytes(password), bcrypt.gensalt())
     return hashed.decode("utf-8")
 
+# Alias kept because the test fixtures import this name.
+hash_password = get_password_hash
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Return ``True`` when ``plain_password`` matches ``hashed_password``."""
@@ -80,3 +83,43 @@ def verify_access_token(token: str) -> dict:
             detail="Invalid or expired token",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+
+# --------------------------------------------------------------------------
+# Password reset tokens
+# --------------------------------------------------------------------------
+
+PASSWORD_RESET_PURPOSE = "password_reset"
+
+
+def _password_fingerprint(password_hash: str) -> str:
+    """Short digest of the stored hash, embedded in reset tokens.
+
+    The fingerprint changes the moment the password does, so a reset token
+    stops working as soon as it has been used (or the password has changed by
+    any other route) without needing a token table. It is a one-way digest of
+    a bcrypt hash, so it reveals nothing useful if the token is inspected.
+    """
+    return hashlib.sha256(password_hash.encode("utf-8")).hexdigest()[:16]
+
+
+def create_password_reset_token(user_id: str, password_hash: str) -> str:
+    """Return a short-lived, single-use token that authorises one password reset."""
+    return create_access_token(
+        subject=user_id,
+        extra_claims={"purpose": PASSWORD_RESET_PURPOSE, "fp": _password_fingerprint(password_hash)},
+        expires_delta=timedelta(minutes=settings.PASSWORD_RESET_TOKEN_EXPIRE_MINUTES),
+    )
+
+
+def decode_password_reset_token(token: str) -> dict:
+    """Decode a reset token; raises ``JWTError`` if invalid, expired or not a reset token."""
+    claims = decode_access_token(token)
+    if claims.get("purpose") != PASSWORD_RESET_PURPOSE or not claims.get("sub"):
+        raise JWTError("Not a password reset token")
+    return claims
+
+
+def reset_token_matches_password(claims: dict, password_hash: str) -> bool:
+    """True while the password has not changed since the token was issued."""
+    return claims.get("fp") == _password_fingerprint(password_hash)

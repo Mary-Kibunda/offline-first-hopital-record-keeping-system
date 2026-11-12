@@ -2,11 +2,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
+from app.api.clinic_access import clinic_filter, get_accessible_patient
 from app.api.deps import get_current_user
 from app.core.database import get_db
 from app.models.mixins import new_uuid
 from app.models.patient import Patient
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.schemas.patient import PatientCreate, PatientRead, PatientUpdate
 
 router = APIRouter(prefix="/patients", tags=["patients"])
@@ -16,6 +17,15 @@ router = APIRouter(prefix="/patients", tags=["patients"])
 def create_patient(
     payload: PatientCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
 ) -> Patient:
+    if (
+        current_user.role != UserRole.administrator
+        and payload.registered_clinic_id != current_user.clinic_id
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only register patients at your assigned clinic.",
+        )
+
     patient_id = payload.id or new_uuid()
     if db.get(Patient, patient_id) is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A patient with this id already exists.")
@@ -36,9 +46,11 @@ def search_patients(
     current_user: User = Depends(get_current_user),
 ) -> list[Patient]:
     query = db.query(Patient).filter(Patient.deleted_at.is_(None))
-
-    if clinic_id:
-        query = query.filter(Patient.registered_clinic_id == clinic_id)
+    if current_user.role == UserRole.administrator:
+        if clinic_id:
+            query = query.filter(Patient.registered_clinic_id == clinic_id)
+    else:
+        query = clinic_filter(query, Patient.registered_clinic_id, current_user)
 
     if q:
         like = f"%{q}%"
@@ -58,10 +70,7 @@ def search_patients(
 def get_patient(
     patient_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
 ) -> Patient:
-    patient = db.get(Patient, patient_id)
-    if patient is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Patient not found")
-    return patient
+    return get_accessible_patient(db, patient_id, current_user)
 
 
 @router.patch("/{patient_id}", response_model=PatientRead)
@@ -71,9 +80,7 @@ def update_patient(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> Patient:
-    patient = db.get(Patient, patient_id)
-    if patient is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Patient not found")
+    patient = get_accessible_patient(db, patient_id, current_user)
 
     for key, value in payload.model_dump(exclude_unset=True).items():
         setattr(patient, key, value)

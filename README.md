@@ -131,3 +131,37 @@ is a strong starting point, not a guarantee.
 
 The full conflict-detection policy is documented in the docstring at the
 top of `app/services/sync_service.py`.
+## Email notifications and password reset
+
+Users now have an `email` address (required when an admin creates a user; run
+`alembic upgrade head` to add the column).
+
+* **Welcome email** – `POST /api/v1/users` emails the new user their username,
+  password and the sign-in link. It is sent in the background, so a mail-server
+  outage never blocks account creation (failures are logged).
+* **Forgot password** – `POST /api/v1/auth/forgot-password` with `{"email": ...}`
+  emails a link to `FRONTEND_URL + PASSWORD_RESET_PATH ?token=...`. The response
+  is the same whether or not the address exists.
+* **Reset password** – `POST /api/v1/auth/reset-password` with
+  `{"token": ..., "new_password": ...}`. Tokens expire after
+  `PASSWORD_RESET_TOKEN_EXPIRE_MINUTES` (default 30) and stop working once used.
+
+Add to `.env` (if `SMTP_HOST` is empty, emails are logged instead of sent):
+
+```
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_USERNAME=...
+SMTP_PASSWORD=...
+SMTP_USE_TLS=true          # STARTTLS; set SMTP_USE_SSL=true for port 465
+SMTP_USE_SSL=false
+EMAIL_FROM=no-reply@yourdomain.com
+EMAIL_FROM_NAME=Health Chart
+FRONTEND_URL=https://your-frontend.example.com
+PASSWORD_RESET_PATH=/reset-password
+PASSWORD_RESET_TOKEN_EXPIRE_MINUTES=30
+```
+
+The frontend needs a page at that path that reads `?token=` and POSTs it, with
+the new password, to `/auth/reset-password`.
+.

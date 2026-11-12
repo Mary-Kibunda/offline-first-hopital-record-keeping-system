@@ -12,7 +12,7 @@ Guard rails worth noting:
 * an admin cannot deactivate or delete their own account.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_roles
@@ -20,6 +20,7 @@ from app.core.database import get_db
 from app.core.security import get_password_hash
 from app.models.mixins import new_uuid
 from app.models.user import User, UserRole
+from app.services.email_service import send_welcome_email
 from app.schemas.user import UserCreate, UserRead, UserUpdate
 
 router = APIRouter(
@@ -30,9 +31,13 @@ router = APIRouter(
 
 
 @router.post("", response_model=UserRead, status_code=status.HTTP_201_CREATED)
-def create_user(payload: UserCreate, db: Session = Depends(get_db)) -> User:
+def create_user(payload: UserCreate, background_tasks: BackgroundTasks, db: Session = Depends(get_db)) -> User:
+    """Create an account and email the new user their username and password."""
     if db.query(User).filter(User.username == payload.username).first() is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="That username is already taken.")
+    email = payload.email.lower()
+    if db.query(User).filter(User.email == email).first() is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="That email is already in use.")
 
     password_hash = get_password_hash(payload.password)
 
@@ -41,6 +46,7 @@ def create_user(payload: UserCreate, db: Session = Depends(get_db)) -> User:
         id=user_id,
         name=payload.name,
         username=payload.username,
+        email=email,
         role=payload.role,
         clinic_id=payload.clinic_id,
         password_hash=password_hash,
@@ -48,6 +54,10 @@ def create_user(payload: UserCreate, db: Session = Depends(get_db)) -> User:
     db.add(user)
     db.commit()
     db.refresh(user)
+
+    # Sent after the commit, in the background: the account exists regardless of
+    # whether the mail server is reachable.
+    background_tasks.add_task(send_welcome_email, email, user.name, user.username, payload.password)
     return user
 
 
@@ -70,7 +80,13 @@ def update_user(user_id: str, payload: UserUpdate, db: Session = Depends(get_db)
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-    for key, value in payload.model_dump(exclude_unset=True).items():
+    changes = payload.model_dump(exclude_unset=True)
+    if changes.get("email") is not None:
+        changes["email"] = changes["email"].lower()
+        taken = db.query(User).filter(User.email == changes["email"], User.id != user.id).first()
+        if taken is not None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="That email is already in use.")
+    for key, value in changes.items():
         setattr(user, key, value)
     user.version += 1
 
