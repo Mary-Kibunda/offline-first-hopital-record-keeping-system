@@ -71,7 +71,12 @@ def pull(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> SyncPullResponse:
-    data = pull_updates(db, since, current_user=current_user)
+    data = pull_updates(
+        db,
+        since,
+        sync_entities_for(current_user.role),
+        current_user=current_user,
+    )
     return SyncPullResponse(
         server_time=datetime.now(timezone.utc),
         patients=data.get("patient", []),

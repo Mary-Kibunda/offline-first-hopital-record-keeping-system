@@ -9,7 +9,7 @@ bcrypt only considers the first 72 bytes of a password, so input is truncated
 to that length explicitly rather than letting the library raise.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import hashlib
 
 import bcrypt

@@ -10,6 +10,8 @@ Public surface:
 * ``POST /auth/reset-password``  - sets a new password from that link's token.
 """
 
+from datetime import timedelta
+
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 import logging
@@ -26,7 +28,8 @@ from app.core.security import (
     get_password_hash,
     reset_token_matches_password,
 )
-from app.models.user import User
+from app.models.user import User, UserRole
+from app.schemas.user import UserRegister
 from app.schemas.user import ForgotPasswordRequest, MessageResponse, ResetPasswordRequest, Token, UserRead
 from app.services.auth_service import authenticate_user
 from app.services.email_service import send_password_reset_email
@@ -125,6 +128,5 @@ def reset_password(payload: ResetPasswordRequest, db: Session = Depends(get_db))
     user.version += 1
     db.commit()
     return MessageResponse(detail="Your password has been reset. You can now sign in.")
-
 
 

@@ -73,7 +73,14 @@ def _entity_fields_differ(existing: Any, incoming_fields: dict[str, Any]) -> boo
     return False
 
 
-def push_item(db: Session, device_id: str, user_id: str, item: SyncPushItem) -> SyncPushResult:
+def push_item(
+    db: Session,
+    device_id: str,
+    user_id: str,
+    item: SyncPushItem,
+    *,
+    current_user: User | None = None,
+) -> SyncPushResult:
     """Apply one queued record to the database, per the policy above."""
     registry_entry = _REGISTRY.get(item.entity_type)
     if registry_entry is None:
@@ -225,10 +232,109 @@ def _log(
     )
 
 
+def _rejected(entity_type: str, entity_id: str, detail: str) -> SyncPushResult:
+    return SyncPushResult(
+        entity_type=entity_type,
+        entity_id=entity_id,
+        status="rejected",
+        detail=detail,
+    )
+
+
+def _clinic_id_for_fields(
+    db: Session, entity_type: str, fields: dict[str, Any]
+) -> str | None:
+    if entity_type == "patient":
+        return fields.get("registered_clinic_id")
+    if entity_type == "drug_stock":
+        return fields.get("clinic_id")
+
+    if entity_type in {"appointment", "consultation"}:
+        patient = db.get(Patient, fields.get("patient_id"))
+        return patient.registered_clinic_id if patient is not None else None
+
+    if entity_type == "prescription":
+        consultation = db.get(Consultation, fields.get("consultation_id"))
+        drug = db.get(DrugStock, fields.get("drug_id"))
+        if consultation is None or drug is None:
+            return None
+        patient = db.get(Patient, consultation.patient_id)
+        if patient is None or drug.clinic_id != patient.registered_clinic_id:
+            return None
+        return patient.registered_clinic_id
+
+    return None
+
+
+def _clinic_id_for_record(db: Session, entity_type: str, record: Any) -> str | None:
+    if entity_type == "patient":
+        return record.registered_clinic_id
+    if entity_type == "drug_stock":
+        return record.clinic_id
+    if entity_type in {"appointment", "consultation"}:
+        patient = db.get(Patient, record.patient_id)
+        return patient.registered_clinic_id if patient is not None else None
+    if entity_type == "prescription":
+        consultation = db.get(Consultation, record.consultation_id)
+        if consultation is None:
+            return None
+        patient = db.get(Patient, consultation.patient_id)
+        drug = db.get(DrugStock, record.drug_id)
+        if patient is None or drug is None or drug.clinic_id != patient.registered_clinic_id:
+            return None
+        return patient.registered_clinic_id
+    return None
+
+
+def _validate_clinic_scope(
+    db: Session, entity_type: str, fields: dict[str, Any], current_user: User
+) -> str | None:
+    if current_user.role == UserRole.administrator:
+        return None
+    clinic_id = _clinic_id_for_fields(db, entity_type, fields)
+    if clinic_id is None:
+        return "The record references an unavailable clinic or inconsistent clinic data."
+    if clinic_id != current_user.clinic_id:
+        return "You can only sync records belonging to your assigned clinic."
+    return None
+
+
+def _record_in_scope(
+    db: Session, entity_type: str, record: Any, current_user: User
+) -> bool:
+    return (
+        current_user.role == UserRole.administrator
+        or _clinic_id_for_record(db, entity_type, record) == current_user.clinic_id
+    )
+
+
+def _decrement_stock_for_prescription(
+    db: Session, prescription_fields: dict[str, Any]
+) -> str | None:
+    drug = db.get(DrugStock, prescription_fields.get("drug_id"))
+    if drug is None:
+        return "The prescription references unavailable drug stock."
+
+    quantity = prescription_fields.get("quantity")
+    if not isinstance(quantity, int) or quantity <= 0:
+        return "The prescription quantity must be greater than zero."
+    if drug.quantity_available < quantity:
+        return "There is not enough stock to dispense this prescription."
+
+    now = utcnow()
+    drug.quantity_available -= quantity
+    drug.version += 1
+    drug.updated_at = now
+    drug.sync_status = SyncStatus.synced
+    return None
+
+
 def pull_updates(
     db: Session,
     since: datetime | None,
     entity_types: frozenset[str] | set[str] | None = None,
+    *,
+    current_user: User | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """
     Return allowed syncable records updated after `since` (or all allowed
@@ -240,12 +346,37 @@ def pull_updates(
             continue
         query = db.query(model_cls)
         if current_user is not None:
-            query = _scope_sync_query(db, entity_type, query, current_user)
+            query = _scope_sync_query(entity_type, query, current_user)
         if since is not None:
             query = query.filter(model_cls.updated_at > since)
         rows = query.all()
         result[entity_type] = [_row_to_dict(row) for row in rows]
     return result
+
+
+def _scope_sync_query(entity_type: str, query: Any, current_user: User) -> Any:
+    if current_user.role == UserRole.administrator:
+        return query
+
+    if entity_type == "patient":
+        return query.filter(Patient.registered_clinic_id == current_user.clinic_id)
+    if entity_type == "appointment":
+        return query.join(Patient, Appointment.patient_id == Patient.id).filter(
+            Patient.registered_clinic_id == current_user.clinic_id
+        )
+    if entity_type == "consultation":
+        return query.join(Patient, Consultation.patient_id == Patient.id).filter(
+            Patient.registered_clinic_id == current_user.clinic_id
+        )
+    if entity_type == "prescription":
+        return (
+            query.join(Consultation, Prescription.consultation_id == Consultation.id)
+            .join(Patient, Consultation.patient_id == Patient.id)
+            .filter(Patient.registered_clinic_id == current_user.clinic_id)
+        )
+    if entity_type == "drug_stock":
+        return query.filter(DrugStock.clinic_id == current_user.clinic_id)
+    return query
 
 
 def _row_to_dict(row: Any) -> dict[str, Any]:

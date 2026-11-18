@@ -2,7 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.api.clinic_access import clinic_filter
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_roles
+from app.api.policies import PHARMACY
 from app.core.database import get_db
 from app.models.drug_stock import DrugStock
 from app.models.mixins import new_uuid

@@ -3,7 +3,8 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.api.clinic_access import clinic_filter, get_accessible_patient
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_roles
+from app.api.policies import CLINICAL_AND_REGISTRY
 from app.core.database import get_db
 from app.models.mixins import new_uuid
 from app.models.patient import Patient

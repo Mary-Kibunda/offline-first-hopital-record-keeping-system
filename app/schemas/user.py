@@ -6,7 +6,7 @@ typed as :class:`app.models.user.UserRole` so FastAPI validates and documents
 the allowed values automatically.
 """
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, EmailStr
 
 from app.models.user import UserRole
 from app.schemas.base import SyncMetadataOut

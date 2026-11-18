@@ -53,6 +53,26 @@ def _appointment_payload(patient_id: str, staff_id: str, scheduled_at: datetime)
     }
 
 
+def test_list_appointments_returns_clinic_appointments(
+    appointment_context: tuple[TestClient, User],
+    db_session,
+    appointment_patient: Patient,
+) -> None:
+    client, staff = appointment_context
+    appointment = Appointment(
+        patient_id=appointment_patient.id,
+        staff_id=staff.id,
+        scheduled_at=_future_time(),
+    )
+    db_session.add(appointment)
+    db_session.flush()
+
+    response = client.get("/api/v1/appointments")
+
+    assert response.status_code == 200, response.text
+    assert [item["id"] for item in response.json()] == [appointment.id]
+
+
 def test_create_appointment_rejects_past_datetime(
     appointment_context: tuple[TestClient, User],
     appointment_patient: Patient,
